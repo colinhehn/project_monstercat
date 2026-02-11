@@ -7,8 +7,8 @@ from moviepy.video.VideoClip import ColorClip
 # TODO: make these configurable on script runtime with Textual CLI (GitHub).
 W, H = 1080, 1920
 FPS = 60
-AUDIO_PATH = "unused_promo_wav/blue_solo_monstercat_promo.wav"
-N_BANDS = 24
+AUDIO_PATH = "unused_promo_wav/toietmoit_house_monstercat_promo.wav"
+N_BANDS = 36
 BAND_COLOR = [255, 255, 255]
 
 y, sr = librosa.load(AUDIO_PATH)
@@ -19,6 +19,25 @@ S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=N_BANDS)
 S_db = librosa.power_to_db(S, ref=np.max)
 S_norm = (S_db - S_db.min()) / (S_db.max() - S_db.min())
 
+def bar_amplitude_smoothing(S_norm: np.ndarray, attack=0.9, decay=0.15):
+    smoothed_S = np.zeros_like(S_norm)
+
+    for t in range(1, S_norm.shape[1]):
+        # attack_speed: 0.9 (on amp increase)
+        # decay_speed: 0.15 (on amp decrease)
+        for b in range(S_norm.shape[0]):
+            target = S_norm[b, t]
+            prev = smoothed_S[b, t-1]
+        
+            if target > prev:
+                smoothed_S[b, t] = prev + (target - prev) * attack
+            else:
+                smoothed_S[b, t] = prev - (prev - target) * decay
+    return smoothed_S
+
+# waveform bar amplitudes have variable attack and decay for inter-frame smoothing 
+S_final = bar_amplitude_smoothing(S_norm)
+
 def make_frame(t):
     """
     This function is called by MoviePy for every frame of the video.
@@ -28,11 +47,11 @@ def make_frame(t):
     # create canvas with transparent background
     frame = np.zeros((H, W, 3), dtype='uint8')
     
-    # Calculate which index in our S_norm matrix corresponds to time 't'
-    idx = int((t / duration) * S_norm.shape[1])
-    if idx >= S_norm.shape[1]: idx = S_norm.shape[1] - 1
+    # Calculate which index in our S_final matrix corresponds to time 't'
+    idx = int((t / duration) * S_final.shape[1])
+    if idx >= S_final.shape[1]: idx = S_final.shape[1] - 1
     
-    current_amplitudes = S_norm[:, idx]
+    current_amplitudes = S_final[:, idx]
     
     bar_width = W // N_BANDS
     for i, amp in enumerate(current_amplitudes):
