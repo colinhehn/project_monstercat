@@ -1,0 +1,11 @@
+# environment files
+.vscode/
+
+# audio and video export housing
+unused_promo_wav/
+used_promo_wav/
+exports/
+
+# output files
+output_waveform.mov
+output_waveformTEMP_MPY_wvf_snd.mp3
