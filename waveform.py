@@ -1,8 +1,21 @@
-from re import L
+from typing import Any
+import cv2
 import numpy as np
 import librosa
 from moviepy import VideoClip, AudioFileClip
-from moviepy.video.VideoClip import ColorClip
+
+
+### DEPENDENCY VALIDATION #####################################################
+
+print(f"OpenCV Version: {cv2.__version__}")
+
+# Check if LINE_AA is available (it should be for 60FPS rendering).
+if hasattr(cv2, 'LINE_AA'):
+    print("Anti-aliasing (LINE_AA) is ready for 60FPS.")
+else:
+    print("Warning: LINE_AA not found. Check your OpenCV installation.")
+
+
 
 #### CONFIGURATION ############################################################
 
@@ -76,14 +89,8 @@ def make_frame(t):
     
     # create canvas with transparent background
     frame = np.zeros((H, W, 3), dtype='uint8')
-    
-    # # Calculate which index in our S_norm matrix corresponds to time 't'
-    # idx = int((t / duration) * S_norm.shape[1])
-    # if idx >= S_norm.shape[1]: idx = S_norm.shape[1] - 1
-    
-    # current_amplitudes = S_norm[:, idx]
 
-    # float index for linear interpolation
+    # float index for linear interpolation (temporal smoothing)
     float_idx = (t / duration) * (S_norm.shape[1] - 1)
     idx_floor = int(np.floor(float_idx))
     idx_ceil = int(np.ceil(float_idx))
@@ -94,19 +101,31 @@ def make_frame(t):
     # (1-w)*a + w*b where a is current frame index and b is next frame index
     current_amplitudes = (1 - weight) * S_norm[:, idx_floor] + weight * S_norm[:, idx_ceil]
     
-    bar_width = W // N_BANDS
-    for i, amp in enumerate(current_amplitudes):
+    # keep width as float (not //) for spatial smoothing (LINE_AA)
+    bar_width = W / N_BANDS
+
+    # Vector rasterization for frame at time 't'.
+    bar_polygons = []
+    for i, amp in enumerate[Any](current_amplitudes):
         # max bar height is 700px
-        bar_height = int(amp * 700)
-        
+        bar_height = amp * 700
         x1 = i * bar_width
-        y1 = H // 2 + 350  # Center it vertically
-        x2 = x1 + bar_width - 3 # -3 for a small gap between bars
+        y1 = (H // 2) + 350  # Center it vertically
+        x2 = (x1 + bar_width) - 5 # 5px gap between bars
         y2 = y1 - bar_height
         
-        # use NumPy slicing to "draw" the rectangle on the array
-        frame[y2:y1, x1:x2] = BAND_COLOR
-        
+        rect_points = np.array([
+            [x1, y1],
+            [x2, y1],
+            [x2, y2],
+            [x1, y2]
+        ], dtype=np.int32)
+
+        bar_polygons.append(rect_points)
+
+    # Draw all bars in one step.
+    cv2.fillPoly(frame, bar_polygons, BAND_COLOR, lineType=cv2.LINE_AA)
+
     return frame
 
 
