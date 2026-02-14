@@ -21,9 +21,12 @@ else:
 
 # TODO: make these configurable on script runtime with Textual CLI (GitHub).
 W, H = 1080, 1920
+N_BANDS = 24
+GUTTER = 4 # px gap between bars
+BAR_WIDTH = (W - (N_BANDS * GUTTER)) / N_BANDS # total available width / number of bars
+
 FPS = 60
 AUDIO_PATH = "unused_promo_wav/toietmoit_house_monstercat_promo.wav"
-N_BANDS = 24
 BAND_COLOR = [255, 255, 255]
 
 y, sr = librosa.load(AUDIO_PATH)
@@ -38,7 +41,7 @@ S_norm = (S_db - S_db.min()) / (S_db.max() - S_db.min())
 
 ### WAVEFORM PRE-PROCESSING FUNCTIONS #########################################
 
-def gravity(S_norm: np.ndarray, attack: float=0.8, decay: float=0.5):
+def gravity(S_norm: np.ndarray, attack: float=0.8, decay: float=0.15):
     """
     Lessens amplitude variation between frames based on above coefficients.
     The attack and decay rates can be adjusted to control the speed of the effect for amplitude increase/decrease.
@@ -100,26 +103,28 @@ def make_frame(t):
 
     # (1-w)*a + w*b where a is current frame index and b is next frame index
     current_amplitudes = (1 - weight) * S_norm[:, idx_floor] + weight * S_norm[:, idx_ceil]
-    
-    # keep width as float (not //) for spatial smoothing (LINE_AA)
-    bar_width = W / N_BANDS
 
     # Vector rasterization for frame at time 't'.
     bar_polygons = []
     for i, amp in enumerate[Any](current_amplitudes):
         # max bar height is 700px
         bar_height = amp * 700
-        x1 = i * bar_width
+
+        # x1 based on num of previous 'i' bars and gutters
+        x1 = i * (BAR_WIDTH + GUTTER)
+        x2 = x1 + BAR_WIDTH
+
         y1 = (H // 2) + 350  # Center it vertically
-        x2 = (x1 + bar_width) - 5 # 5px gap between bars
         y2 = y1 - bar_height
-        
-        rect_points = np.array([
-            [x1, y1],
-            [x2, y1],
-            [x2, y2],
-            [x1, y2]
-        ], dtype=np.int32)
+
+        # Round points for consistency
+        bot_left_pt = (int(round(x1)), int(round(y1)))
+        top_right_pt = (int(round(x2)), int(round(y2)))
+        bot_right_pt = (int(round(x2)), int(round(y1)))
+        top_left_pt = (int(round(x1)), int(round(y2)))
+
+        # Use polygons for LINE_AA anti-aliasing (spatial smoothing).
+        rect_points = np.array([bot_left_pt, bot_right_pt, top_right_pt, top_left_pt], dtype=np.int32)
 
         bar_polygons.append(rect_points)
 
