@@ -39,11 +39,14 @@ has a TUI) maybe I'll make it more open-source friendly
 
 #### TODO or something
 
-- Make the transition between frames on the waveform smoother.
-- Bars thicker, and less of them? In the future it could all be configurable.
-- TUI with Rich or Textual
+- Make the transition between frames on the waveform smoother. [DONE]
+- Bars thicker and less of them? [DONE]
+- Full audio signal chain to "match" Monstercat somewhat [DONE for now]
 - Add color to the waveform, and gradients??? Maybe the gradient could be
-  moving... panning linearly as an overlay or pass-through or something.
-- Be able to adjust the frequency bins to fit different types of audio for
+  moving... panning linearly as an overlay or pass-through or something. [WIP]
+- bloom [WIP]
+- TUI with Rich or Textual
+- In the future it could all be configurable.
+  - Be able to adjust the frequency bins to fit different types of audio for
   optimal visual clarity. A guitar solo will not render very interestingly on
   this visualizer right now...
