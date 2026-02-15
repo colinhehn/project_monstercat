@@ -12,12 +12,11 @@ W, H = 1000, 1000
 N_BANDS = 24
 GUTTER = 4 # px gap between bars
 BAR_WIDTH = (W - (N_BANDS * GUTTER)) / N_BANDS # total available width / number of bars
+MAX_BAR_HEIGHT = 1200
 
 FPS = 60
-AUDIO_PATH = "unused_promo_wav/when_david_heard_monstercat_promo.wav"
+AUDIO_PATH = "unused_promo_wav/toietmoit_house_monstercat_promo.wav"
 BAND_COLOR = [255, 255, 255]
-
-
 
 ### WAVEFORM PRE-PROCESSING FUNCTIONS #########################################
 
@@ -99,6 +98,9 @@ if hasattr(cv2, 'LINE_AA'):
 else:
     print("Warning: LINE_AA not found. Check your OpenCV installation.")
 
+print(f"waveform params: [W = {W}, H = {H}, N_BANDS = {N_BANDS}, GUTTER = {GUTTER},")
+print(f"BAR_WIDTH = {BAR_WIDTH}, MAX_BAR_HEIGHT = {MAX_BAR_HEIGHT}]")
+print("----------------------------------------")
 
 
 ### AUDIO SIGNAL CHAIN ###################################################
@@ -157,7 +159,48 @@ print(f"--- gaussian filter applied: [sigma = {gaussian_filter}]")
 
 
 
-### WAVEFORM RENDERING FUNCTION ###############################################
+### WAVEFORM RENDERING FUNCTIONS ###############################################
+
+def draw_rounded_bar(frame, x1, y1, x2, y2, radius, color):
+    """
+    x1, y1: Bottom-left (y1 is the floor)
+    x2, y2: Top-right (y2 is the peak)
+    radius: How 'round' the top corners are
+    """
+    # Ensure radius isn't larger than half the bar width
+    bar_width = abs(x2 - x1)
+    radius = min(radius, bar_width // 2)
+    
+    # Define the 6 key points of a flat-bottom, round-top bar
+    # We use a fan of points for the top corners to make them smooth
+    points = []
+    
+    # 1. Bottom Right
+    points.append([x2, y1])
+    # 2. Bottom Left
+    points.append([x1, y1])
+    # 3. Left vertical side up to the start of the curve
+    points.append([x1, y2 + radius])
+    
+    # 4. Top-Left Curve (Arc)
+    for i in range(180, 270, 10): # 10-degree steps for smoothness
+        angle = np.radians(i)
+        px = x1 + radius + radius * np.cos(angle)
+        py = y2 + radius + radius * np.sin(angle)
+        points.append([px, py])
+        
+    # 5. Top-Right Curve (Arc)
+    for i in range(270, 360, 10):
+        angle = np.radians(i)
+        px = x2 - radius + radius * np.cos(angle)
+        py = y2 + radius + radius * np.sin(angle)
+        points.append([px, py])
+        
+    # 6. Right vertical side down
+    points.append([x2, y2 + radius])
+
+    poly_points = np.array(points, dtype=np.int32)
+    cv2.fillConvexPoly(frame, poly_points, color, lineType=cv2.LINE_AA)
 
 def make_frame(t: float) -> np.ndarray:
     """
@@ -182,8 +225,9 @@ def make_frame(t: float) -> np.ndarray:
     # Vector rasterization for frame at time 't'.
     bar_polygons = []
     for i, amp in enumerate[Any](current_amplitudes):
-        # max bar height is 1000px
-        bar_height = amp * 1200
+        # TODO: Place hard cap for bar height to prevent overflow. Max has gotta
+        #       be adjustable or automatic since it's different for each song...
+        bar_height = amp *  MAX_BAR_HEIGHT
 
         # x1 based on num of previous 'i' bars and gutters
         x1 = i * (BAR_WIDTH + GUTTER)
