@@ -8,19 +8,21 @@ from scipy.ndimage import gaussian_filter1d
 #### CONFIGURATION ############################################################
 
 # TODO: make these configurable on script runtime with Textual CLI (GitHub).
-W, H = 1000, 1000
+W, H = 1400, 1400
 N_BANDS = 24
 GUTTER = 4 # px gap between bars
-BAR_WIDTH = (W - (N_BANDS * GUTTER)) / N_BANDS # total available width / number of bars
+BAR_WIDTH = ((W-400) - (N_BANDS * GUTTER)) / N_BANDS # total available width / number of bars
 MAX_BAR_HEIGHT = 1200
 
 FPS = 60
 AUDIO_PATH = "unused_promo_wav/toietmoit_house_monstercat_promo.wav"
-BAND_COLOR = [255, 255, 255]
+BAND_COLOR = [255, 242, 97]
+COLOR_BOTTOM = [255, 242, 97]
+COLOR_TOP = [255, 153, 241]
 
 ### WAVEFORM PRE-PROCESSING FUNCTIONS #########################################
 
-def gravity(S_norm: np.ndarray, attack: float=0.7, max_decay: float=0.15, min_decay: float=0.05) -> np.ndarray:
+def gravity(S_norm: np.ndarray, attack: float=0.5, max_decay: float=0.15, min_decay: float=0.05) -> np.ndarray:
     """
     Lessens amplitude variation between frames based on above coefficients.
     The attack and decay rates can be adjusted to control the speed of the effect for amplitude increase/decrease.
@@ -161,46 +163,87 @@ print(f"--- gaussian filter applied: [sigma = {gaussian_filter}]")
 
 ### WAVEFORM RENDERING FUNCTIONS ###############################################
 
-def draw_rounded_bar(frame, x1, y1, x2, y2, radius, color):
+def draw_rounded_bars(frame: np.ndarray, amplitudes: np.ndarray) -> None:
     """
-    x1, y1: Bottom-left (y1 is the floor)
-    x2, y2: Top-right (y2 is the peak)
-    radius: How 'round' the top corners are
+    Draws bar with rounded corners at designated coordinates.
+    Handles curve logic for the rounded corners with given radius.
     """
-    # Ensure radius isn't larger than half the bar width
-    bar_width = abs(x2 - x1)
-    radius = min(radius, bar_width // 2)
-    
-    # Define the 6 key points of a flat-bottom, round-top bar
-    # We use a fan of points for the top corners to make them smooth
-    points = []
-    
-    # 1. Bottom Right
-    points.append([x2, y1])
-    # 2. Bottom Left
-    points.append([x1, y1])
-    # 3. Left vertical side up to the start of the curve
-    points.append([x1, y2 + radius])
-    
-    # 4. Top-Left Curve (Arc)
-    for i in range(180, 270, 10): # 10-degree steps for smoothness
-        angle = np.radians(i)
-        px = x1 + radius + radius * np.cos(angle)
-        py = y2 + radius + radius * np.sin(angle)
-        points.append([px, py])
-        
-    # 5. Top-Right Curve (Arc)
-    for i in range(270, 360, 10):
-        angle = np.radians(i)
-        px = x2 - radius + radius * np.cos(angle)
-        py = y2 + radius + radius * np.sin(angle)
-        points.append([px, py])
-        
-    # 6. Right vertical side down
-    points.append([x2, y2 + radius])
 
-    poly_points = np.array(points, dtype=np.int32)
-    cv2.fillConvexPoly(frame, poly_points, color, lineType=cv2.LINE_AA)
+    corner_radius = 0.5  # 50% rounding
+    radius = int(BAR_WIDTH * corner_radius)
+    print(f"--- bar rounded corner radius: [{corner_radius}]")
+
+    bar_polygons = []
+    for i, amp in enumerate[Any](amplitudes):
+        # TODO: Place hard cap for bar height to prevent overflow. Max has gotta
+        #       be adjustable or automatic since it's different for each song...
+        bar_height = amp *  MAX_BAR_HEIGHT
+
+        # x1 based on num of previous 'i' bars and gutters
+        x1 = (i * (BAR_WIDTH + GUTTER)) + 200 # 200 centers the wave form with the borders
+        x2 = x1 + BAR_WIDTH
+
+        y1 = 1200
+        y2 = y1 - bar_height
+
+        # Ensure radius isn't larger than half the bar width
+        bar_width = abs(x2 - x1)
+        radius = min(radius, bar_width // 2)
+        
+        points = []
+        points.append([x2, y1]) # bottom right
+        points.append([x1, y1]) # bottom left
+        points.append([x1, y2 + radius]) # left vertical side up to the start of the curve
+        
+        # top left curve
+        for i in range(180, 270, 10): # 10-degree steps for smoothness
+            angle = np.radians(i)
+            px = x1 + radius + radius * np.cos(angle)
+            py = y2 + radius + radius * np.sin(angle)
+            points.append([px, py])
+            
+        # top right curve
+        for i in range(270, 360, 10):
+            angle = np.radians(i)
+            px = x2 - radius + radius * np.cos(angle)
+            py = y2 + radius + radius * np.sin(angle)
+            points.append([px, py])
+            
+        points.append([x2, y2 + radius]) # right vertical side down
+        bar_polygons.append(np.array(points, dtype=np.int32))
+
+    # Draw all bars in one step.
+    cv2.fillPoly(frame, bar_polygons, BAND_COLOR, lineType=cv2.LINE_AA)
+
+
+def draw_bars(frame: np.ndarray, amplitudes: np.ndarray) -> None:
+    bar_polygons = []
+    for i, amp in enumerate[Any](amplitudes):
+        # TODO: Place hard cap for bar height to prevent overflow. Max has gotta
+        #       be adjustable or automatic since it's different for each song...
+        bar_height = amp *  MAX_BAR_HEIGHT
+
+        # x1 based on num of previous 'i' bars and gutters
+        x1 = (i * (BAR_WIDTH + GUTTER)) + 200 # 200 centers the wave form with the borders
+        x2 = x1 + BAR_WIDTH
+
+        y1 = 1200
+        y2 = y1 - bar_height
+
+        # Round points for consistency
+        bot_left_pt = (int(round(x1)), int(round(y1)))
+        top_right_pt = (int(round(x2)), int(round(y2)))
+        bot_right_pt = (int(round(x2)), int(round(y1)))
+        top_left_pt = (int(round(x1)), int(round(y2)))
+
+        # Use polygons for LINE_AA anti-aliasing (spatial smoothing).
+        rect_points = np.array([bot_left_pt, bot_right_pt, top_right_pt, top_left_pt], dtype=np.int32)
+
+        bar_polygons.append(rect_points)
+
+    # Draw all bars in one step.
+    cv2.fillPoly(frame, bar_polygons, BAND_COLOR, lineType=cv2.LINE_AA)
+
 
 def make_frame(t: float) -> np.ndarray:
     """
@@ -222,33 +265,14 @@ def make_frame(t: float) -> np.ndarray:
     # (1-w)*a + w*b where a is current frame index and b is next frame index
     current_amplitudes = (1 - weight) * S_norm[:, idx_floor] + weight * S_norm[:, idx_ceil]
 
-    # Vector rasterization for frame at time 't'.
-    bar_polygons = []
-    for i, amp in enumerate[Any](current_amplitudes):
-        # TODO: Place hard cap for bar height to prevent overflow. Max has gotta
-        #       be adjustable or automatic since it's different for each song...
-        bar_height = amp *  MAX_BAR_HEIGHT
+    # ROUNDED BAR OPTION
+    draw_rounded_bars(frame, current_amplitudes)
 
-        # x1 based on num of previous 'i' bars and gutters
-        x1 = i * (BAR_WIDTH + GUTTER)
-        x2 = x1 + BAR_WIDTH
+    # RECTANGULAR BAR OPTION
+    # draw_bars(frame, current_amplitudes)
 
-        y1 = 1000  # Touching the "floor"
-        y2 = y1 - bar_height
+    # Visualizer post-processing
 
-        # Round points for consistency
-        bot_left_pt = (int(round(x1)), int(round(y1)))
-        top_right_pt = (int(round(x2)), int(round(y2)))
-        bot_right_pt = (int(round(x2)), int(round(y1)))
-        top_left_pt = (int(round(x1)), int(round(y2)))
-
-        # Use polygons for LINE_AA anti-aliasing (spatial smoothing).
-        rect_points = np.array([bot_left_pt, bot_right_pt, top_right_pt, top_left_pt], dtype=np.int32)
-
-        bar_polygons.append(rect_points)
-
-    # Draw all bars in one step.
-    cv2.fillPoly(frame, bar_polygons, BAND_COLOR, lineType=cv2.LINE_AA)
 
     return frame
 
