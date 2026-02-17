@@ -43,6 +43,7 @@ def gravity(S_norm: np.ndarray, attack: float=0.5, max_decay: float=0.15, min_de
     print(f"--- gravity effect applied with decay gradient: [attack = {attack}, max_decay = {max_decay}, min_decay = {min_decay}]")
     return smoothed_S
 
+
 def rolling_average(data: np.ndarray, window_size: int=3) -> np.ndarray:
     """
     Applies a rolling average to the signal data, modifying values in place based on the
@@ -55,6 +56,7 @@ def rolling_average(data: np.ndarray, window_size: int=3) -> np.ndarray:
         data[i, :] = np.convolve(data[i, :], kernel, mode='same')
     return data
 
+
 def wash_delay(S_norm:np.ndarray) -> np.array:
     """
     Creates a visual effect by delaying the energy from treble/mid to bass, so
@@ -66,6 +68,7 @@ def wash_delay(S_norm:np.ndarray) -> np.array:
             # This creates the visual 'wash'
             S_norm[b-1, t] += S_norm[b, t-1] * 0.1
     return S_norm
+
 
 def spectral_delay(S_norm: np.ndarray, max_delay_frames: int=4) -> np.ndarray:
     """
@@ -173,6 +176,7 @@ def draw_rounded_bars(frame: np.ndarray, amplitudes: np.ndarray) -> None:
     radius = int(BAR_WIDTH * corner_radius)
     print(f"--- bar rounded corner radius: [{corner_radius}]")
 
+
     bar_polygons = []
     for i, amp in enumerate[Any](amplitudes):
         # TODO: Place hard cap for bar height to prevent overflow. Max has gotta
@@ -245,6 +249,14 @@ def draw_bars(frame: np.ndarray, amplitudes: np.ndarray) -> None:
     cv2.fillPoly(frame, bar_polygons, BAND_COLOR, lineType=cv2.LINE_AA)
 
 
+def apply_bloom(frame: np.ndarray) -> np.ndarray:
+    # Create waveform mask
+    bloom_mask = cv2.GaussianBlur(frame, (25, 25), 0)
+    
+    # Add back to frame to add glow
+    return cv2.addWeighted(frame, 1.0, bloom_mask, 0.5, 0)
+
+
 def make_frame(t: float) -> np.ndarray:
     """
     This function is called by MoviePy for every frame of the video.
@@ -272,7 +284,7 @@ def make_frame(t: float) -> np.ndarray:
     # draw_bars(frame, current_amplitudes)
 
     # Visualizer post-processing
-
+    frame = apply_bloom(frame)
 
     return frame
 
