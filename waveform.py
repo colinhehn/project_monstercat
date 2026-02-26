@@ -16,9 +16,9 @@ MAX_BAR_HEIGHT = 1200
 
 FPS = 60
 AUDIO_PATH = "unused_promo_wav/toietmoit_house_monstercat_promo.wav"
-BAND_COLOR = [255, 242, 97]
-COLOR_BOTTOM = [255, 242, 97]
-COLOR_TOP = [255, 153, 241]
+STATIC_COLOR = [255, 255, 255]
+GRADIENT_COLOR_BOTTOM = [255, 231, 97]
+GRADIENT_COLOR_TOP = [255, 96, 234]
 
 ### WAVEFORM PRE-PROCESSING FUNCTIONS #########################################
 
@@ -172,7 +172,7 @@ def draw_rounded_bars(frame: np.ndarray, amplitudes: np.ndarray) -> None:
     Handles curve logic for the rounded corners with given radius.
     """
 
-    corner_radius = 0.5  # 50% rounding
+    corner_radius = 0.1  # 10% rounding
     radius = int(BAR_WIDTH * corner_radius)
     print(f"--- bar rounded corner radius: [{corner_radius}]")
 
@@ -217,7 +217,7 @@ def draw_rounded_bars(frame: np.ndarray, amplitudes: np.ndarray) -> None:
         bar_polygons.append(np.array(points, dtype=np.int32))
 
     # Draw all bars in one step.
-    cv2.fillPoly(frame, bar_polygons, BAND_COLOR, lineType=cv2.LINE_AA)
+    cv2.fillPoly(frame, bar_polygons, STATIC_COLOR, lineType=cv2.LINE_AA)
 
 
 def draw_bars(frame: np.ndarray, amplitudes: np.ndarray) -> None:
@@ -246,16 +246,52 @@ def draw_bars(frame: np.ndarray, amplitudes: np.ndarray) -> None:
         bar_polygons.append(rect_points)
 
     # Draw all bars in one step.
-    cv2.fillPoly(frame, bar_polygons, BAND_COLOR, lineType=cv2.LINE_AA)
+    cv2.fillPoly(frame, bar_polygons, STATIC_COLOR, lineType=cv2.LINE_AA)
 
 
-def apply_bloom(frame: np.ndarray) -> np.ndarray:
-    # Create waveform mask
-    bloom_mask = cv2.GaussianBlur(frame, (25, 25), 0)
-    
-    # Add back to frame to add glow
-    return cv2.addWeighted(frame, 1.0, bloom_mask, 0.5, 0)
+def apply_bloom(frame: np.ndarray, layers: int=4, base_ksize: int=31, intensity: float=0.45) -> np.ndarray:
+    """    
+    layers      -- number of blur passes (each doubles the kernel size)
+    base_ksize  -- starting kernel width (must be odd)
+    intensity   -- strength multiplier per layer (decays with each pass)
+    """
+    bloom = frame.astype(np.float32)
+    result = bloom.copy()
 
+    for i in range(layers):
+        ksize = base_ksize + i * 2 * base_ksize  # 31, 93, 155, 217 …
+        ksize = ksize if ksize % 2 == 1 else ksize + 1
+        blurred = cv2.GaussianBlur(bloom, (ksize, ksize), 0)
+        weight = intensity / (i + 1)
+        result += blurred * weight
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+def create_gradient(top_fraction: float = 0.2):
+    """top_fraction: fraction of height (from top) that is pure GRADIENT_COLOR_TOP before blending."""
+    bottom = np.array(GRADIENT_COLOR_BOTTOM, dtype=np.float64)
+    top = np.array(GRADIENT_COLOR_TOP, dtype=np.float64)
+    top_band = int(H * top_fraction)
+    grad = np.zeros((H, W, 3), dtype='uint8')
+    for y in range(H):
+        if y < top_band:
+            grad[y, :] = top.astype(np.uint8)
+        else:
+            # blend from top to bottom over the remaining height
+            mix = 1.0 - (y - top_band) / (H - top_band)
+            grad[y, :] = np.clip(bottom + (top - bottom) * mix, 0, 255).astype(np.uint8)
+    return grad
+
+def create_vignette():
+    # Create a 2D Gaussian mask
+    kernel_x = cv2.getGaussianKernel(W, W/2)
+    kernel_y = cv2.getGaussianKernel(H, H/2)
+    kernel = kernel_y * kernel_x.T
+    mask = kernel / kernel.max()
+    return mask[:, :, np.newaxis] # Shape (H, W, 1) for broadcasting
+
+GLOBAL_GRADIENT = create_gradient()
+VIGNETTE_MASK = create_vignette()
 
 def make_frame(t: float) -> np.ndarray:
     """
@@ -263,8 +299,9 @@ def make_frame(t: float) -> np.ndarray:
     't' is the current time in seconds.
     """
     
-    # create canvas with transparent background
+    # create canvas with transparent background and mask canvas for bar drawing
     frame = np.zeros((H, W, 3), dtype='uint8')
+    mask = np.zeros((H, W, 3), dtype='uint8')
 
     # float index for linear interpolation (temporal smoothing)
     float_idx = (t / duration) * (S_norm.shape[1] - 1)
@@ -278,12 +315,24 @@ def make_frame(t: float) -> np.ndarray:
     current_amplitudes = (1 - weight) * S_norm[:, idx_floor] + weight * S_norm[:, idx_ceil]
 
     # ROUNDED BAR OPTION
-    draw_rounded_bars(frame, current_amplitudes)
+    # draw_rounded_bars(frame, current_amplitudes)
 
     # RECTANGULAR BAR OPTION
-    # draw_bars(frame, current_amplitudes)
+    draw_bars(mask, current_amplitudes)
 
-    # Visualizer post-processing
+    # Gradient color masking
+    frame = cv2.bitwise_and(GLOBAL_GRADIENT, mask)
+
+    # CRT Scanlines
+    frame[::3, :,:] = (frame[::3, :, :] * 0.5).astype('uint8')
+
+    # Chromatic aberation
+    b, g, r = cv2.split(frame)
+    r = np.roll(r, 2, axis=1)  # Shift Red channel 2px right
+    b = np.roll(b, -2, axis=1) # Shift Blue channel 2px left
+    frame = cv2.merge([b, g, r])
+
+    # Bloom
     frame = apply_bloom(frame)
 
     return frame
