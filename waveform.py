@@ -8,11 +8,11 @@ from scipy.ndimage import gaussian_filter1d
 #### CONFIGURATION ############################################################
 
 # TODO: make these configurable on script runtime with Textual CLI (GitHub).
-W, H = 1400, 1400
-N_BANDS = 24
+W, H = 1080, 1920
+N_BANDS = 18
 GUTTER = 4 # px gap between bars
-BAR_WIDTH = ((W-400) - (N_BANDS * GUTTER)) / N_BANDS # total available width / number of bars
-MAX_BAR_HEIGHT = 1200
+BAR_WIDTH = (W - (N_BANDS * GUTTER)) / N_BANDS # total available width / number of bars
+MAX_BAR_HEIGHT = 1920
 
 FPS = 60
 AUDIO_PATH = "unused_promo_wav/toietmoit_house_monstercat_promo.wav"
@@ -184,10 +184,10 @@ def draw_rounded_bars(frame: np.ndarray, amplitudes: np.ndarray) -> None:
         bar_height = amp *  MAX_BAR_HEIGHT
 
         # x1 based on num of previous 'i' bars and gutters
-        x1 = (i * (BAR_WIDTH + GUTTER)) + 200 # 200 centers the wave form with the borders
+        x1 = (i * (BAR_WIDTH + GUTTER))
         x2 = x1 + BAR_WIDTH
 
-        y1 = 1200
+        y1 = 1920
         y2 = y1 - bar_height
 
         # Ensure radius isn't larger than half the bar width
@@ -228,10 +228,10 @@ def draw_bars(frame: np.ndarray, amplitudes: np.ndarray) -> None:
         bar_height = amp *  MAX_BAR_HEIGHT
 
         # x1 based on num of previous 'i' bars and gutters
-        x1 = (i * (BAR_WIDTH + GUTTER)) + 200 # 200 centers the wave form with the borders
+        x1 = (i * (BAR_WIDTH + GUTTER))
         x2 = x1 + BAR_WIDTH
 
-        y1 = 1200
+        y1 = 1920
         y2 = y1 - bar_height
 
         # Round points for consistency
@@ -324,16 +324,16 @@ def make_frame(t: float) -> np.ndarray:
     frame = cv2.bitwise_and(GLOBAL_GRADIENT, mask)
 
     # CRT Scanlines
-    frame[::3, :,:] = (frame[::3, :, :] * 0.5).astype('uint8')
+    # frame[::3, :,:] = (frame[::3, :, :] * 0.5).astype('uint8')
 
     # Chromatic aberation
-    b, g, r = cv2.split(frame)
-    r = np.roll(r, 2, axis=1)  # Shift Red channel 2px right
-    b = np.roll(b, -2, axis=1) # Shift Blue channel 2px left
-    frame = cv2.merge([b, g, r])
+    # b, g, r = cv2.split(frame)
+    # r = np.roll(r, 2, axis=1)  # Shift Red channel 2px right
+    # b = np.roll(b, -2, axis=1) # Shift Blue channel 2px left
+    # frame = cv2.merge([b, g, r])
 
     # Bloom
-    frame = apply_bloom(frame)
+    # frame = apply_bloom(frame)
 
     return frame
 
