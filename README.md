@@ -29,14 +29,21 @@ going for the monstercat (aka the goats) look for the sake of nostalgia
 
 #### Matrix ASCII mask (optional)
 
-Static grid of CMatrix-inspired characters (katakana, digits, letters) can modulate
-bar brightness while keeping the gradient colors — a digital/code look without
-animating or calling the `cmatrix` binary.
+Static or dynamic CMatrix-inspired characters can modulate bar brightness while
+keeping the gradient colors — a digital/code look.
 
-1. Uncomment `frame = apply_matrix_mask(frame, mask)` in `make_frame` (after the gradient composite). The glyph field is built lazily on the first frame.
-2. Tune density via `MATRIX_CHARS_PER_BAR_ROW` (`1` = fewer, larger glyphs per bar row) and `MATRIX_CELL_HEIGHT_RATIO` (higher = fewer rows). Also `MATRIX_CHARSET`, `MATRIX_LUM_CUTOFF`, and `MATRIX_SEED`. Cell width is derived from bar width; height follows the ratio.
+**Static grid** — one random layout for the whole video:
 
-Quick preview at the loudest frame: uncomment the matching lines in `debug_bar_geometry()` then run `python3 waveform.py --debug-bars` to write `debug_bar_matrix.png`.
+1. Uncomment `frame = apply_matrix_mask(frame, mask)` in `make_frame`; set `USE_MATRIX_MASK = True`, `USE_MATRIX_RAIN = False`.
+2. Tune density via `MATRIX_CHARS_PER_BAR_ROW`, `MATRIX_CELL_HEIGHT_RATIO`, `MATRIX_CHARSET`, `MATRIX_LUM_CUTOFF`, and `MATRIX_SEED`.
+
+**Dynamic rain** — falling columns with bright head and dimming trail:
+
+1. Uncomment `frame = apply_matrix_rain_mask(frame, mask, t)` in `make_frame`; set `USE_MATRIX_RAIN = True`, `USE_MATRIX_MASK = False`.
+2. Tune `MATRIX_RAIN_FPS` and `MATRIX_RAIN_CHAR_MUTATION`. Rain is continuous (new glyph every tick per column, no idle gaps).
+3. Brightness: `MATRIX_RAIN_SCREEN_TOP_BRIGHTNESS` / `MATRIX_RAIN_SCREEN_BOTTOM_BRIGHTNESS` control a linear fade by screen y (dim top, bright bottom). `MATRIX_LUM_CUTOFF` applies to the static mask only; rain keeps any non-zero glyph stroke.
+
+Quick preview at the loudest frame: uncomment the matching lines in `debug_bar_geometry()` then run `python3 waveform.py --debug-bars` to write `debug/bars/matrix.png`.
 
 #### Matrix debug (charset / glyph verification)
 
@@ -46,14 +53,13 @@ If bars show thin lines instead of letters, glyphs were likely clipped (text lar
 python3 waveform.py --debug-matrix
 ```
 
-Check outputs in order:
+Outputs go to `debug/matrix/`. Check in order:
 
-1. `debug_matrix_atlas.png` — every character in `MATRIX_CHARSET` must be readable in its cell.
-2. `debug_matrix_lum.png` — full-frame static glyph grid.
-3. `debug_matrix_on_bars.png` — matrix on bars **without** CRT/chromatic (ground truth).
-4. `debug_matrix_with_crt_chromatic.png` — same as `make_frame` post-effects (scanlines/chromatic can obscure glyphs).
+1. `atlas.png` — every character in `MATRIX_CHARSET` must be readable in its cell.
+2. Static: `lum.png`, `on_bars.png`. Rain: `rain_lum_t*.png` (multiple times), `rain_on_bars.png`.
+3. `*_with_crt_chromatic.png` — same as `make_frame` post-effects (scanlines/chromatic can obscure glyphs).
 
-Iterate on `MATRIX_CHARS_PER_BAR_ROW`, `MATRIX_CELL_HEIGHT_RATIO`, and `MATRIX_CHARSET` until (1) looks correct, then (3).
+Iterate on `MATRIX_CHARS_PER_BAR_ROW`, `MATRIX_CELL_HEIGHT_RATIO`, and `MATRIX_CHARSET` until (1) looks correct, then the on-bars preview.
 
 ---
 

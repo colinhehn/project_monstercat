@@ -1,3 +1,4 @@
+from math import ceil
 from typing import Any
 import os
 import sys
@@ -10,6 +11,16 @@ from scipy.ndimage import gaussian_filter1d
 DEBUG_BAR_HEIGHT = os.environ.get("DEBUG_BAR_HEIGHT", "").lower() in ("1", "true", "yes")
 DEBUG_BARS_ONLY = DEBUG_BAR_HEIGHT or "--debug-bars" in sys.argv
 DEBUG_MATRIX_ONLY = "--debug-matrix" in sys.argv
+DEBUG_DIR = "debug"
+DEBUG_FLAG_BARS = "bars"
+DEBUG_FLAG_MATRIX = "matrix"
+
+
+def debug_out(flag: str, filename: str) -> str:
+    """Write path under debug/{flag}/; creates the directory if needed."""
+    directory = os.path.join(DEBUG_DIR, flag)
+    os.makedirs(directory, exist_ok=True)
+    return os.path.join(directory, filename)
 
 
 def log_section(title: str) -> None:
@@ -23,16 +34,19 @@ def log_item(key: str, value: object) -> None:
 def log_matrix_mask(
     *,
     enabled: bool,
+    mode: str = "static",
     glyphs: int | None = None,
     scale_min: float | None = None,
     scale_max: float | None = None,
     layout_seed: int | None = None,
+    rain_ticks: int | None = None,
 ) -> None:
     """Single config block for matrix settings and (optional) build results."""
     log_section("Matrix mask")
     log_item("Enabled", enabled)
     if not enabled:
         return
+    log_item("Mode", mode)
     log_item("Cell size", f"{MATRIX_CELL_W}x{MATRIX_CELL_H}px")
     log_item("Grid density", f"~{W // MATRIX_CELL_W}x{H // MATRIX_CELL_H} cells")
     log_item("Chars per bar row", MATRIX_CHARS_PER_BAR_ROW)
@@ -41,6 +55,16 @@ def log_matrix_mask(
     log_item("Charset size", len(MATRIX_CHARSET))
     log_item("Lum cutoff", MATRIX_LUM_CUTOFF)
     log_item("Seed", MATRIX_SEED if MATRIX_SEED is not None else "random per run")
+    if mode == "rain":
+        log_item("Rain FPS", MATRIX_RAIN_FPS)
+        log_item("Rain mode", "continuous (head every tick)")
+        log_item(
+            "Screen fade (top->bottom)",
+            f"{MATRIX_RAIN_SCREEN_TOP_BRIGHTNESS} -> {MATRIX_RAIN_SCREEN_BOTTOM_BRIGHTNESS}",
+        )
+        log_item("Char mutation", MATRIX_RAIN_CHAR_MUTATION)
+        if rain_ticks is not None:
+            log_item("Rain ticks", rain_ticks)
     if glyphs is not None:
         log_item("Glyphs loaded", glyphs)
     if scale_min is not None and scale_max is not None:
@@ -73,7 +97,7 @@ if MAX_BAR_HEIGHT > MAX_DRAWABLE_HEIGHT:
     )
 
 FPS = 60
-AUDIO_PATH = "Pattern 5.wav"
+AUDIO_PATH = "unused_promo_wav/when_david_heard_monstercat_promo.wav"
 STATIC_COLOR = [255, 255, 255]
 GRADIENT_COLOR_BOTTOM = [255, 231, 97]
 GRADIENT_COLOR_TOP = [255, 96, 234]
@@ -98,8 +122,16 @@ MATRIX_SEED = None  # None = random layout each run; set an int (e.g. 0) to fix 
 MATRIX_FONT = cv2.FONT_HERSHEY_SIMPLEX
 MATRIX_FONT_THICKNESS = 3  # OpenCV putText stroke weight (1=thin, 2+=bolder)
 MATRIX_GLYPH_PAD = 0  # tight fit; glyphs may touch cell edges
+# Dynamic rain (CMatrix-style falling columns)
+MATRIX_RAIN_FPS = 20
+# Screen-space glyph brightness by y (0–255): dim toward top, full at bottom.
+MATRIX_RAIN_SCREEN_TOP_BRIGHTNESS = 96
+MATRIX_RAIN_SCREEN_BOTTOM_BRIGHTNESS = 255
+MATRIX_RAIN_CHAR_MUTATION = 0.125
 # Keep in sync with make_frame: True when apply_matrix_mask(...) is uncommented.
-USE_MATRIX_MASK = True
+USE_MATRIX_MASK = False
+# Keep in sync with make_frame: True when apply_matrix_rain_mask(...) is uncommented.
+USE_MATRIX_RAIN = True
 
 ### WAVEFORM PRE-PROCESSING FUNCTIONS #########################################
 
@@ -432,27 +464,92 @@ def build_matrix_glyph_atlas(charset: str) -> tuple[np.ndarray, str, float, floa
     return np.stack(tiles, axis=0), "".join(renderable), min(scales), max(scales)
 
 
+def _matrix_grid_size() -> tuple[int, int]:
+    grid_w = (W + MATRIX_CELL_W - 1) // MATRIX_CELL_W
+    grid_h = (H + MATRIX_CELL_H - 1) // MATRIX_CELL_H
+    return grid_w, grid_h
+
+
+def _build_matrix_rain_screen_ramp() -> np.ndarray:
+    """Per-pixel y multiplier, shape (H, 1). Linear: top=SCREEN_TOP, bottom=SCREEN_BOTTOM."""
+    y = np.arange(H, dtype=np.float32)
+    t = y / max(H - 1, 1)
+    ramp = (
+        MATRIX_RAIN_SCREEN_TOP_BRIGHTNESS
+        + t * (MATRIX_RAIN_SCREEN_BOTTOM_BRIGHTNESS - MATRIX_RAIN_SCREEN_TOP_BRIGHTNESS)
+    )
+    return ramp.astype(np.uint8)[:, np.newaxis]
+
+
+_MATRIX_RAIN_SCREEN_RAMP: np.ndarray | None = None
+
+
+def _matrix_rain_screen_ramp() -> np.ndarray:
+    global _MATRIX_RAIN_SCREEN_RAMP
+    if _MATRIX_RAIN_SCREEN_RAMP is None:
+        _MATRIX_RAIN_SCREEN_RAMP = _build_matrix_rain_screen_ramp()
+    return _MATRIX_RAIN_SCREEN_RAMP
+
+
+def compose_lum_from_grid(
+    atlas: np.ndarray,
+    char_grid: np.ndarray,
+    bright_grid: np.ndarray,
+) -> np.ndarray:
+    """Atlas blit: glyph stroke lum = tile * bright_cell (255=active, 0=empty)."""
+    grid_h, grid_w = char_grid.shape
+    tiles = atlas[char_grid.astype(np.intp)]
+    tiles = (
+        tiles.astype(np.uint16) * bright_grid[..., None, None] // 255
+    ).astype(np.uint8)
+    lum = tiles.transpose(0, 2, 1, 3).reshape(
+        grid_h * MATRIX_CELL_H, grid_w * MATRIX_CELL_W
+    )
+    return lum[:H, :W]
+
+
+def apply_matrix_rain_screen_ramp(lum: np.ndarray) -> np.ndarray:
+    """Apply screen-vertical brightness once, after glyph lum is composed."""
+    ramp = _matrix_rain_screen_ramp()
+    return (lum.astype(np.uint16) * ramp // 255).astype(np.uint8)
+
+
+def _modulate_frame_with_lum(
+    frame: np.ndarray,
+    mask: np.ndarray,
+    lum: np.ndarray,
+    *,
+    use_lum_cutoff: bool = True,
+) -> np.ndarray:
+    """
+    Multiply bar pixels by glyph luminance; gaps stay black.
+    Static uses MATRIX_LUM_CUTOFF to drop anti-aliased bleed. Rain uses lum>0 only
+    so screen-faded (dim) strokes are not clipped.
+    """
+    bar = mask[:, :, 0] > 0
+    glyph = lum.astype(np.float32) / 255.0
+    if use_lum_cutoff:
+        glyph = np.where(lum >= MATRIX_LUM_CUTOFF, glyph, 0.0)
+    else:
+        glyph = np.where(lum > 0, glyph, 0.0)
+    factor = glyph[:, :, np.newaxis]
+    out = frame.astype(np.float32)
+    out[bar] = out[bar] * factor[bar]
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def build_matrix_glyph_field() -> np.ndarray:
     """Full-frame static luminance field: random char per grid cell."""
     atlas, charset, scale_min, scale_max = build_matrix_glyph_atlas(MATRIX_CHARSET)
-    grid_w = (W + MATRIX_CELL_W - 1) // MATRIX_CELL_W
-    grid_h = (H + MATRIX_CELL_H - 1) // MATRIX_CELL_H
-    seed = MATRIX_SEED if MATRIX_SEED is not None else np.random.randint(0, 2**32)
+    grid_w, grid_h = _matrix_grid_size()
+    seed = MATRIX_SEED if MATRIX_SEED is not None else int(np.random.default_rng().integers(0, 2**32))
     rng = np.random.default_rng(seed)
     char_grid = rng.integers(0, len(charset), (grid_h, grid_w))
-
-    lum = np.zeros((H, W), dtype=np.uint8)
-    for gy in range(grid_h):
-        y0 = gy * MATRIX_CELL_H
-        y1 = min(y0 + MATRIX_CELL_H, H)
-        th = y1 - y0
-        for gx in range(grid_w):
-            x0 = gx * MATRIX_CELL_W
-            x1 = min(x0 + MATRIX_CELL_W, W)
-            tw = x1 - x0
-            lum[y0:y1, x0:x1] = atlas[char_grid[gy, gx], :th, :tw]
+    bright_grid = np.full((grid_h, grid_w), 255, dtype=np.uint8)
+    lum = compose_lum_from_grid(atlas, char_grid, bright_grid)
     log_matrix_mask(
         enabled=True,
+        mode="static",
         glyphs=len(charset),
         scale_min=scale_min,
         scale_max=scale_max,
@@ -478,13 +575,124 @@ def apply_matrix_mask(frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
     Keeps hue on glyph strokes; gaps (low lum) go fully black.
     """
     lum = _ensure_matrix_glyph_field()
-    bar = mask[:, :, 0] > 0
-    glyph = lum.astype(np.float32) / 255.0
-    glyph = np.where(lum >= MATRIX_LUM_CUTOFF, glyph, 0.0)
-    factor = glyph[:, :, np.newaxis]
-    out = frame.astype(np.float32)
-    out[bar] = out[bar] * factor[bar]
-    return np.clip(out, 0, 255).astype(np.uint8)
+    return _modulate_frame_with_lum(frame, mask, lum)
+
+
+class MatrixRainSimulator:
+    """Per-column code rain: scroll down one row per tick, new head every tick (no gaps)."""
+
+    def __init__(
+        self,
+        grid_h: int,
+        grid_w: int,
+        n_chars: int,
+        rng: np.random.Generator,
+    ) -> None:
+        self.grid_h = grid_h
+        self.grid_w = grid_w
+        self.n_chars = n_chars
+        self.char_grid = np.zeros((grid_h, grid_w), dtype=np.uint8)
+        self.bright_grid = np.zeros((grid_h, grid_w), dtype=np.uint8)
+        self.tick = 0
+        for gx in range(grid_w):
+            for row in range(grid_h):
+                self.char_grid[row, gx] = int(rng.integers(0, n_chars))
+                self.bright_grid[row, gx] = 255
+
+    def _advance_column(self, gx: int, rng: np.random.Generator) -> None:
+        col_c = self.char_grid[:, gx].copy()
+        col_b = self.bright_grid[:, gx].copy()
+        self.char_grid[1:, gx] = col_c[:-1]
+        self.bright_grid[1:, gx] = col_b[:-1]
+        self.char_grid[0, gx] = int(rng.integers(0, self.n_chars))
+        self.bright_grid[0, gx] = 255
+        for row in range(1, self.grid_h):
+            if self.bright_grid[row, gx] == 0:
+                continue
+            if rng.random() < MATRIX_RAIN_CHAR_MUTATION:
+                self.char_grid[row, gx] = int(rng.integers(0, self.n_chars))
+
+    def step(self, rng: np.random.Generator) -> None:
+        self.tick += 1
+        for gx in range(self.grid_w):
+            self._advance_column(gx, rng)
+
+    def snapshot(self) -> tuple[np.ndarray, np.ndarray]:
+        return self.char_grid.copy(), self.bright_grid.copy()
+
+
+_MATRIX_RAIN_ATLAS: np.ndarray | None = None
+_MATRIX_RAIN_SNAPSHOTS: list[tuple[np.ndarray, np.ndarray]] | None = None
+_MATRIX_RAIN_LUM_CACHE: dict[int, np.ndarray] = {}
+_MATRIX_RAIN_SEED: int | None = None
+
+
+def precompute_matrix_rain_snapshots() -> None:
+    """Simulate rain ticks once at startup; store char/bright grids per tick."""
+    global _MATRIX_RAIN_ATLAS, _MATRIX_RAIN_SNAPSHOTS, _MATRIX_RAIN_LUM_CACHE
+    global _MATRIX_RAIN_SEED, _MATRIX_RAIN_SCREEN_RAMP
+
+    _MATRIX_RAIN_SCREEN_RAMP = None
+
+    atlas, charset, scale_min, scale_max = build_matrix_glyph_atlas(MATRIX_CHARSET)
+    grid_w, grid_h = _matrix_grid_size()
+    seed = MATRIX_SEED if MATRIX_SEED is not None else int(np.random.default_rng().integers(0, 2**32))
+    rng = np.random.default_rng(seed)
+    n_ticks = max(1, int(ceil(duration * MATRIX_RAIN_FPS)))
+
+    sim = MatrixRainSimulator(grid_h, grid_w, len(charset), rng)
+    snapshots: list[tuple[np.ndarray, np.ndarray]] = []
+    for _ in range(n_ticks):
+        snapshots.append(sim.snapshot())
+        sim.step(rng)
+
+    _MATRIX_RAIN_ATLAS = atlas
+    _MATRIX_RAIN_SNAPSHOTS = snapshots
+    _MATRIX_RAIN_LUM_CACHE = {}
+    _MATRIX_RAIN_SEED = seed
+
+    log_matrix_mask(
+        enabled=True,
+        mode="rain",
+        glyphs=len(charset),
+        scale_min=scale_min,
+        scale_max=scale_max,
+        layout_seed=seed,
+        rain_ticks=n_ticks,
+    )
+
+
+def _ensure_matrix_rain() -> None:
+    if _MATRIX_RAIN_SNAPSHOTS is None:
+        precompute_matrix_rain_snapshots()
+
+
+def _rain_tick_index(t: float) -> int:
+    if _MATRIX_RAIN_SNAPSHOTS is None:
+        return 0
+    idx = int(t * MATRIX_RAIN_FPS)
+    return min(idx, len(_MATRIX_RAIN_SNAPSHOTS) - 1)
+
+
+def _rain_lum_at_time(t: float) -> np.ndarray:
+    _ensure_matrix_rain()
+    assert _MATRIX_RAIN_ATLAS is not None
+    assert _MATRIX_RAIN_SNAPSHOTS is not None
+
+    tick = _rain_tick_index(t)
+    lum = _MATRIX_RAIN_LUM_CACHE.get(tick)
+    if lum is None:
+        char_grid, bright_grid = _MATRIX_RAIN_SNAPSHOTS[tick]
+        lum = compose_lum_from_grid(_MATRIX_RAIN_ATLAS, char_grid, bright_grid)
+        lum = apply_matrix_rain_screen_ramp(lum)
+        _MATRIX_RAIN_LUM_CACHE[tick] = lum
+    return lum
+
+
+def apply_matrix_rain_mask(frame: np.ndarray, mask: np.ndarray, t: float) -> np.ndarray:
+    """Modulate bar pixels with a time-varying code-rain luminance field."""
+    lum = _rain_lum_at_time(t)
+    return _modulate_frame_with_lum(frame, mask, lum, use_lum_cutoff=False)
 
 
 def create_gradient(top_fraction: float = 0.2):
@@ -513,7 +721,7 @@ def create_vignette():
 GLOBAL_GRADIENT = create_gradient()
 VIGNETTE_MASK = create_vignette()
 
-def _save_matrix_atlas_sheet(atlas: np.ndarray, charset: str) -> None:
+def _save_matrix_atlas_sheet(atlas: np.ndarray, charset: str, out_path: str) -> None:
     """Contact sheet of every glyph tile for visual charset verification."""
     n = len(charset)
     cols = min(16, max(1, n))
@@ -539,7 +747,17 @@ def _save_matrix_atlas_sheet(atlas: np.ndarray, charset: str) -> None:
             1,
             cv2.LINE_8,
         )
-    cv2.imwrite("debug_matrix_atlas.png", sheet)
+    cv2.imwrite(out_path, sheet)
+
+
+def _apply_crt_postfx(frame: np.ndarray) -> np.ndarray:
+    """Scanlines + chromatic aberration (same as make_frame post-matrix)."""
+    out = frame.copy()
+    out[::3, :, :] = (out[::3, :, :] * 0.5).astype(np.uint8)
+    b, g, r = cv2.split(out)
+    r = np.roll(r, 2, axis=1)
+    b = np.roll(b, -2, axis=1)
+    return cv2.merge([b, g, r])
 
 
 def debug_matrix_glyphs() -> None:
@@ -549,14 +767,40 @@ def debug_matrix_glyphs() -> None:
     """
     global GLOBAL_MATRIX_GLYPH_LUM
     GLOBAL_MATRIX_GLYPH_LUM = None
+    flag = DEBUG_FLAG_MATRIX
+    written: list[str] = []
 
     atlas, charset, _scale_min, _scale_max = build_matrix_glyph_atlas(MATRIX_CHARSET)
-    _save_matrix_atlas_sheet(atlas, charset)
-    lum = build_matrix_glyph_field()
-    GLOBAL_MATRIX_GLYPH_LUM = lum
+    atlas_path = debug_out(flag, "atlas.png")
+    _save_matrix_atlas_sheet(atlas, charset, atlas_path)
+    written.append(atlas_path)
 
-    cv2.imwrite("debug_matrix_lum.png", lum)
-    cv2.imwrite("debug_matrix_lum_color.png", cv2.cvtColor(lum, cv2.COLOR_GRAY2BGR))
+    if USE_MATRIX_MASK:
+        lum = build_matrix_glyph_field()
+        GLOBAL_MATRIX_GLYPH_LUM = lum
+        for name, img in (
+            ("lum.png", lum),
+            ("lum_color.png", cv2.cvtColor(lum, cv2.COLOR_GRAY2BGR)),
+        ):
+            path = debug_out(flag, name)
+            cv2.imwrite(path, img)
+            written.append(path)
+
+    if USE_MATRIX_RAIN:
+        precompute_matrix_rain_snapshots()
+        rain_times = [0.0, 0.25, 0.5, 1.0]
+        for t_sample in rain_times:
+            if t_sample > duration:
+                continue
+            rain_lum = _rain_lum_at_time(t_sample)
+            tag = f"{int(t_sample * 1000):04d}"
+            for name, img in (
+                (f"rain_lum_t{tag}.png", rain_lum),
+                (f"rain_lum_t{tag}_color.png", cv2.cvtColor(rain_lum, cv2.COLOR_GRAY2BGR)),
+            ):
+                path = debug_out(flag, name)
+                cv2.imwrite(path, img)
+                written.append(path)
 
     peak_flat = int(np.argmax(S_norm))
     peak_col = np.unravel_index(peak_flat, S_norm.shape)[1]
@@ -566,33 +810,44 @@ def debug_matrix_glyphs() -> None:
     draw_bars(mask, amps)
     composite = cv2.bitwise_and(GLOBAL_GRADIENT, mask)
 
-    matrix_only = apply_matrix_mask(composite.copy(), mask)
-    cv2.imwrite("debug_matrix_on_bars.png", matrix_only)
+    if USE_MATRIX_MASK:
+        matrix_only = apply_matrix_mask(composite.copy(), mask)
+        path = debug_out(flag, "on_bars.png")
+        cv2.imwrite(path, matrix_only)
+        written.append(path)
+        lum = _ensure_matrix_glyph_field()
+        raw_glyph_view = composite.astype(np.float32)
+        bar = mask[:, :, 0] > 0
+        raw_glyph_view[bar] = (
+            raw_glyph_view[bar] * (lum[bar, np.newaxis].astype(np.float32) / 255.0)
+        )
+        path = debug_out(flag, "raw_multiply.png")
+        cv2.imwrite(path, np.clip(raw_glyph_view, 0, 255).astype(np.uint8))
+        written.append(path)
+        path = debug_out(flag, "with_crt_chromatic.png")
+        cv2.imwrite(path, _apply_crt_postfx(matrix_only))
+        written.append(path)
 
-    raw_glyph_view = composite.astype(np.float32)
-    bar = mask[:, :, 0] > 0
-    raw_glyph_view[bar] = (
-        raw_glyph_view[bar] * (lum[bar, np.newaxis].astype(np.float32) / 255.0)
-    )
-    cv2.imwrite("debug_matrix_raw_multiply.png", np.clip(raw_glyph_view, 0, 255).astype(np.uint8))
-
-    with_post = matrix_only.copy()
-    with_post[::3, :, :] = (with_post[::3, :, :] * 0.5).astype(np.uint8)
-    b, g, r = cv2.split(with_post)
-    r = np.roll(r, 2, axis=1)
-    b = np.roll(b, -2, axis=1)
-    with_post = cv2.merge([b, g, r])
-    cv2.imwrite("debug_matrix_with_crt_chromatic.png", with_post)
+    if USE_MATRIX_RAIN:
+        rain_on_bars = apply_matrix_rain_mask(composite.copy(), mask, t_peak)
+        path = debug_out(flag, "rain_on_bars.png")
+        cv2.imwrite(path, rain_on_bars)
+        written.append(path)
+        path = debug_out(flag, "rain_with_crt_chromatic.png")
+        cv2.imwrite(path, _apply_crt_postfx(rain_on_bars))
+        written.append(path)
 
     clipped = sum(1 for i, ch in enumerate(charset) if atlas[i].max() < 32)
     log_section("Matrix debug exports")
+    log_item("Directory", os.path.join(DEBUG_DIR, flag))
     log_item("Renderable", f"{len(charset)}/{len(MATRIX_CHARSET)} chars")
     log_item("Weak tiles", clipped)
-    log_item("Files", "debug_matrix_atlas.png, debug_matrix_lum.png, ...")
+    log_item("Files", ", ".join(os.path.basename(p) for p in written))
 
 
 def debug_bar_geometry() -> None:
-    """Write debug_bar_*.png at global peak; run with DEBUG_BAR_HEIGHT=1 or --debug-bars."""
+    """Write bar debug PNGs at global peak; run with DEBUG_BAR_HEIGHT=1 or --debug-bars."""
+    flag = DEBUG_FLAG_BARS
     peak_flat = int(np.argmax(S_norm))
     peak_band, peak_col = np.unravel_index(peak_flat, S_norm.shape)
     t_peak = (peak_col / (S_norm.shape[1] - 1)) * duration
@@ -610,17 +865,24 @@ def debug_bar_geometry() -> None:
     cv2.line(overlay, (0, BAR_TOP_MARGIN), (W - 1, BAR_TOP_MARGIN), (255, 0, 0), 2)
     composite = cv2.bitwise_and(GLOBAL_GRADIENT, mask)
     # matrix_frame = apply_matrix_mask(composite, mask)
-    # cv2.imwrite("debug_bar_matrix.png", matrix_frame)
+    # cv2.imwrite(debug_out(flag, "matrix.png"), matrix_frame)
 
     log_section("Bar height debug (peak frame)")
+    log_item("Directory", os.path.join(DEBUG_DIR, flag))
     log_item("Time", f"{t_peak:.3f}s")
     log_item("Peak band / amp", f"{peak_band} / {amps.max():.6f}")
     log_item("Expected top Y", expected_top)
     log_item("Measured span", f"{extent['span']}px (top={extent['top']}, bottom={extent['bottom']})")
-    cv2.imwrite("debug_bar_mask.png", mask)
-    cv2.imwrite("debug_bar_overlay.png", overlay)
-    cv2.imwrite("debug_bar_composite.png", composite)
-    log_item("Files", "debug_bar_mask.png, debug_bar_overlay.png, debug_bar_composite.png")
+    written = []
+    for name, img in (
+        ("mask.png", mask),
+        ("overlay.png", overlay),
+        ("composite.png", composite),
+    ):
+        path = debug_out(flag, name)
+        cv2.imwrite(path, img)
+        written.append(path)
+    log_item("Files", ", ".join(os.path.basename(p) for p in written))
 
 
 def make_frame(t: float) -> np.ndarray:
@@ -645,7 +907,10 @@ def make_frame(t: float) -> np.ndarray:
     frame = cv2.bitwise_and(GLOBAL_GRADIENT, mask)
 
     # Matrix ASCII mask (static CMatrix-style glyphs on bars)
-    frame = apply_matrix_mask(frame, mask)
+    # frame = apply_matrix_mask(frame, mask)
+
+    # Dynamic matrix rain mask (falling code columns on bars)
+    frame = apply_matrix_rain_mask(frame, mask, t)
 
     # CRT Scanlines
     frame[::3, :,:] = (frame[::3, :, :] * 0.5).astype('uint8')
@@ -677,6 +942,8 @@ OUTPUT_PATH = "output_waveform.mov"
 
 if USE_MATRIX_MASK:
     _ensure_matrix_glyph_field()
+elif USE_MATRIX_RAIN:
+    precompute_matrix_rain_snapshots()
 else:
     log_matrix_mask(enabled=False)
 
