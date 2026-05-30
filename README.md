@@ -27,6 +27,34 @@ are! This is waveform programming lol
 
 going for the monstercat (aka the goats) look for the sake of nostalgia
 
+#### Matrix ASCII mask (optional)
+
+Static grid of CMatrix-inspired characters (katakana, digits, letters) can modulate
+bar brightness while keeping the gradient colors — a digital/code look without
+animating or calling the `cmatrix` binary.
+
+1. Uncomment `frame = apply_matrix_mask(frame, mask)` in `make_frame` (after the gradient composite). The glyph field is built lazily on the first frame.
+2. Tune density via `MATRIX_CHARS_PER_BAR_ROW` (`1` = fewer, larger glyphs per bar row) and `MATRIX_CELL_HEIGHT_RATIO` (higher = fewer rows). Also `MATRIX_CHARSET`, `MATRIX_LUM_CUTOFF`, and `MATRIX_SEED`. Cell width is derived from bar width; height follows the ratio.
+
+Quick preview at the loudest frame: uncomment the matching lines in `debug_bar_geometry()` then run `python3 waveform.py --debug-bars` to write `debug_bar_matrix.png`.
+
+#### Matrix debug (charset / glyph verification)
+
+If bars show thin lines instead of letters, glyphs were likely clipped (text larger than the cell). Run:
+
+```bash
+python3 waveform.py --debug-matrix
+```
+
+Check outputs in order:
+
+1. `debug_matrix_atlas.png` — every character in `MATRIX_CHARSET` must be readable in its cell.
+2. `debug_matrix_lum.png` — full-frame static glyph grid.
+3. `debug_matrix_on_bars.png` — matrix on bars **without** CRT/chromatic (ground truth).
+4. `debug_matrix_with_crt_chromatic.png` — same as `make_frame` post-effects (scanlines/chromatic can obscure glyphs).
+
+Iterate on `MATRIX_CHARS_PER_BAR_ROW`, `MATRIX_CELL_HEIGHT_RATIO`, and `MATRIX_CHARSET` until (1) looks correct, then (3).
+
 ---
 
 <br>

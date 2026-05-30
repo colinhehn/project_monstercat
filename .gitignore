@@ -9,3 +9,5 @@ exports/
 # output files
 output_waveform.mov
 output_waveformTEMP_MPY_wvf_snd.mp3
+debug_bar_*.png
+debug_matrix_*.png
