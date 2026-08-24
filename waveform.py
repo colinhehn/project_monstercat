@@ -1,5 +1,5 @@
 from math import ceil
-from typing import Any, Callable
+from typing import Any
 import os
 import sys
 import cv2
@@ -7,11 +7,6 @@ import numpy as np
 import librosa
 from moviepy import VideoClip, AudioFileClip
 from scipy.ndimage import gaussian_filter1d
-
-try:
-    from proglog import ProgressBarLogger
-except ImportError:  # pragma: no cover - moviepy normally pulls this in
-    ProgressBarLogger = None  # type: ignore[misc, assignment]
 
 DEBUG_BAR_HEIGHT = os.environ.get("DEBUG_BAR_HEIGHT", "").lower() in ("1", "true", "yes")
 DEBUG_BARS_ONLY = DEBUG_BAR_HEIGHT or "--debug-bars" in sys.argv
@@ -80,38 +75,41 @@ def log_matrix_mask(
 
 #### CONFIGURATION ############################################################
 
-# Defaults — also used by the Textual UI schema. Mutated via apply_config().
+# Module-level knobs. run(**overrides) can set these before a render.
 W, H = 1080, 1920
 N_BANDS = 18
-GUTTER = 4  # px gap between bars
+GUTTER = 4 # px gap between bars
+BAR_WIDTH = (W - (N_BANDS * GUTTER)) / N_BANDS # total available width / number of bars
 # Bar span in px when amp=1.0 (after peak normalization). NOT including BAR_BOTTOM_MARGIN.
 MAX_BAR_HEIGHT = 1650
 # Lift baseline off frame bottom; adds to "reach from bottom" (reach = margin + MAX_BAR_HEIGHT).
 BAR_BOTTOM_MARGIN = 0
 BAR_TOP_MARGIN = 70  # minimum y index for bar top at full amplitude
 
+BAR_BASE_Y = H - 1 - BAR_BOTTOM_MARGIN
+MAX_DRAWABLE_HEIGHT = BAR_BASE_Y - BAR_TOP_MARGIN
+PEAK_BAR_TOP_Y = BAR_BASE_Y - MAX_BAR_HEIGHT
+PEAK_REACH_FROM_FRAME_BOTTOM = (H - 1) - PEAK_BAR_TOP_Y
+if MAX_BAR_HEIGHT > MAX_DRAWABLE_HEIGHT:
+    raise ValueError(
+        f"MAX_BAR_HEIGHT ({MAX_BAR_HEIGHT}) exceeds drawable range "
+        f"({MAX_DRAWABLE_HEIGHT}): BAR_BASE_Y={BAR_BASE_Y}, BAR_TOP_MARGIN={BAR_TOP_MARGIN}"
+    )
+
 FPS = 60
 AUDIO_PATH = "unused_promo_wav/when_david_heard_monstercat_promo.wav"
-OUTPUT_PATH = "output_waveform.mov"
 STATIC_COLOR = [255, 255, 255]
 GRADIENT_COLOR_BOTTOM = [255, 231, 97]
 GRADIENT_COLOR_TOP = [255, 96, 234]
-
-# Mel / signal-chain knobs (formerly hard-coded mid-script)
-FMIN, FMAX = 20, 7000
-EXPONENT = 2.6
-TILT_MIN, TILT_MAX = 0.8, 2.2
-GRAVITY_ATTACK, GRAVITY_MAX_DECAY, GRAVITY_MIN_DECAY = 0.5, 0.15, 0.05
-GAUSSIAN_FILTER = 1.0
-SPECTRAL_DELAY_MAX_FRAMES = 4
-USE_SPECTRAL_DELAY = True
-USE_WASH_DELAY = True
 
 # Matrix ASCII mask (static grid, CMatrix-inspired charset)
 # Fewer on-screen glyphs → larger cells: use MATRIX_CHARS_PER_BAR_ROW=1 and/or
 # raise MATRIX_CELL_HEIGHT_RATIO (taller rows). Grid math picks up the rest.
 MATRIX_CHARS_PER_BAR_ROW = 1
 MATRIX_CELL_HEIGHT_RATIO = 1
+_BAR_SLOT_W = int(BAR_WIDTH + GUTTER)
+MATRIX_CELL_W = max(1, _BAR_SLOT_W // MATRIX_CHARS_PER_BAR_ROW)
+MATRIX_CELL_H = max(8, int(MATRIX_CELL_W * MATRIX_CELL_HEIGHT_RATIO))
 MATRIX_LUM_CUTOFF = 40  # lum 0–255 below this → black (no gradient bleed in gaps)
 # Hershey fonts only draw ASCII reliably; katakana tiles are usually blank in OpenCV.
 MATRIX_CHARSET = (
@@ -130,240 +128,10 @@ MATRIX_RAIN_FPS = 20
 MATRIX_RAIN_SCREEN_TOP_BRIGHTNESS = 96
 MATRIX_RAIN_SCREEN_BOTTOM_BRIGHTNESS = 255
 MATRIX_RAIN_CHAR_MUTATION = 0.125
+# Keep in sync with make_frame: True when apply_matrix_mask(...) is uncommented.
 USE_MATRIX_MASK = False
+# Keep in sync with make_frame: True when apply_matrix_rain_mask(...) is uncommented.
 USE_MATRIX_RAIN = True
-
-# Derived geometry (recomputed in apply_config / _recompute_derived)
-BAR_WIDTH = (W - (N_BANDS * GUTTER)) / N_BANDS
-BAR_BASE_Y = H - 1 - BAR_BOTTOM_MARGIN
-MAX_DRAWABLE_HEIGHT = BAR_BASE_Y - BAR_TOP_MARGIN
-PEAK_BAR_TOP_Y = BAR_BASE_Y - MAX_BAR_HEIGHT
-PEAK_REACH_FROM_FRAME_BOTTOM = (H - 1) - PEAK_BAR_TOP_Y
-_BAR_SLOT_W = int(BAR_WIDTH + GUTTER)
-MATRIX_CELL_W = max(1, _BAR_SLOT_W // MATRIX_CHARS_PER_BAR_ROW)
-MATRIX_CELL_H = max(8, int(MATRIX_CELL_W * MATRIX_CELL_HEIGHT_RATIO))
-
-# Runtime state filled by run()
-y = None
-sr = None
-audio_clip = None
-duration = 0.0
-S_norm = None
-fmin, fmax = FMIN, FMAX
-exponent = EXPONENT
-tilt_min, tilt_max = TILT_MIN, TILT_MAX
-gravity_attack = GRAVITY_ATTACK
-gravity_max_decay = GRAVITY_MAX_DECAY
-gravity_min_decay = GRAVITY_MIN_DECAY
-gaussian_filter = GAUSSIAN_FILTER
-
-# Schema for the Textual UI (and any future front-ends).
-# type: int | float | bool | str | color (RGB "R,G,B") | optional_int (empty = None)
-CONFIG_SCHEMA: list[dict[str, Any]] = [
-    {"key": "W", "label": "Width", "type": "int", "default": 1080, "group": "Canvas"},
-    {"key": "H", "label": "Height", "type": "int", "default": 1920, "group": "Canvas"},
-    {"key": "FPS", "label": "FPS", "type": "int", "default": 60, "group": "Canvas"},
-    {"key": "N_BANDS", "label": "Bands", "type": "int", "default": 18, "group": "Canvas"},
-    {"key": "GUTTER", "label": "Gutter (px)", "type": "int", "default": 4, "group": "Canvas"},
-    {"key": "MAX_BAR_HEIGHT", "label": "Max bar height", "type": "int", "default": 1650, "group": "Canvas"},
-    {"key": "BAR_BOTTOM_MARGIN", "label": "Bottom margin", "type": "int", "default": 0, "group": "Canvas"},
-    {"key": "BAR_TOP_MARGIN", "label": "Top margin", "type": "int", "default": 70, "group": "Canvas"},
-    {
-        "key": "STATIC_COLOR",
-        "label": "Bar color (RGB)",
-        "type": "color",
-        "default": "255,255,255",
-        "group": "Colors",
-    },
-    {
-        "key": "GRADIENT_COLOR_BOTTOM",
-        "label": "Gradient bottom (RGB)",
-        "type": "color",
-        "default": "255,231,97",
-        "group": "Colors",
-    },
-    {
-        "key": "GRADIENT_COLOR_TOP",
-        "label": "Gradient top (RGB)",
-        "type": "color",
-        "default": "255,96,234",
-        "group": "Colors",
-    },
-    {"key": "FMIN", "label": "Mel fmin (Hz)", "type": "int", "default": 20, "group": "Signal"},
-    {"key": "FMAX", "label": "Mel fmax (Hz)", "type": "int", "default": 7000, "group": "Signal"},
-    {"key": "EXPONENT", "label": "Exponent", "type": "float", "default": 2.6, "group": "Signal"},
-    {"key": "TILT_MIN", "label": "Tilt min", "type": "float", "default": 0.8, "group": "Signal"},
-    {"key": "TILT_MAX", "label": "Tilt max", "type": "float", "default": 2.2, "group": "Signal"},
-    {"key": "GRAVITY_ATTACK", "label": "Gravity attack", "type": "float", "default": 0.5, "group": "Signal"},
-    {"key": "GRAVITY_MAX_DECAY", "label": "Gravity max decay", "type": "float", "default": 0.15, "group": "Signal"},
-    {"key": "GRAVITY_MIN_DECAY", "label": "Gravity min decay", "type": "float", "default": 0.05, "group": "Signal"},
-    {"key": "GAUSSIAN_FILTER", "label": "Gaussian sigma", "type": "float", "default": 1.0, "group": "Signal"},
-    {
-        "key": "SPECTRAL_DELAY_MAX_FRAMES",
-        "label": "Spectral delay frames",
-        "type": "int",
-        "default": 4,
-        "group": "Signal",
-    },
-    {"key": "USE_SPECTRAL_DELAY", "label": "Spectral delay", "type": "bool", "default": True, "group": "Signal"},
-    {"key": "USE_WASH_DELAY", "label": "Wash delay", "type": "bool", "default": True, "group": "Signal"},
-    {"key": "USE_MATRIX_MASK", "label": "Static matrix mask", "type": "bool", "default": False, "group": "Matrix"},
-    {"key": "USE_MATRIX_RAIN", "label": "Matrix rain", "type": "bool", "default": True, "group": "Matrix"},
-    {
-        "key": "MATRIX_CHARS_PER_BAR_ROW",
-        "label": "Chars per bar row",
-        "type": "int",
-        "default": 1,
-        "group": "Matrix",
-    },
-    {
-        "key": "MATRIX_CELL_HEIGHT_RATIO",
-        "label": "Cell height ratio",
-        "type": "float",
-        "default": 1.0,
-        "group": "Matrix",
-    },
-    {"key": "MATRIX_LUM_CUTOFF", "label": "Lum cutoff", "type": "int", "default": 40, "group": "Matrix"},
-    {"key": "MATRIX_FONT_THICKNESS", "label": "Font thickness", "type": "int", "default": 3, "group": "Matrix"},
-    {"key": "MATRIX_RAIN_FPS", "label": "Rain FPS", "type": "int", "default": 20, "group": "Matrix"},
-    {
-        "key": "MATRIX_RAIN_SCREEN_TOP_BRIGHTNESS",
-        "label": "Rain top brightness",
-        "type": "int",
-        "default": 96,
-        "group": "Matrix",
-    },
-    {
-        "key": "MATRIX_RAIN_SCREEN_BOTTOM_BRIGHTNESS",
-        "label": "Rain bottom brightness",
-        "type": "int",
-        "default": 255,
-        "group": "Matrix",
-    },
-    {
-        "key": "MATRIX_RAIN_CHAR_MUTATION",
-        "label": "Rain char mutation",
-        "type": "float",
-        "default": 0.125,
-        "group": "Matrix",
-    },
-    {
-        "key": "MATRIX_SEED",
-        "label": "Matrix seed (empty=random)",
-        "type": "optional_int",
-        "default": "",
-        "group": "Matrix",
-    },
-]
-
-
-def get_default_config() -> dict[str, Any]:
-    """Return a fresh copy of UI-facing defaults from CONFIG_SCHEMA."""
-    return {field["key"]: field["default"] for field in CONFIG_SCHEMA}
-
-
-def _parse_color(value: Any) -> list[int]:
-    if isinstance(value, (list, tuple)) and len(value) == 3:
-        return [int(value[0]), int(value[1]), int(value[2])]
-    if isinstance(value, str):
-        parts = [p.strip() for p in value.replace(" ", "").split(",")]
-        if len(parts) != 3:
-            raise ValueError(f"Color must be R,G,B — got {value!r}")
-        return [int(parts[0]), int(parts[1]), int(parts[2])]
-    raise ValueError(f"Invalid color value: {value!r}")
-
-
-def _recompute_derived() -> None:
-    """Refresh geometry derived from canvas / matrix knobs."""
-    global BAR_WIDTH, BAR_BASE_Y, MAX_DRAWABLE_HEIGHT, PEAK_BAR_TOP_Y
-    global PEAK_REACH_FROM_FRAME_BOTTOM, _BAR_SLOT_W, MATRIX_CELL_W, MATRIX_CELL_H
-
-    BAR_WIDTH = (W - (N_BANDS * GUTTER)) / N_BANDS
-    BAR_BASE_Y = H - 1 - BAR_BOTTOM_MARGIN
-    MAX_DRAWABLE_HEIGHT = BAR_BASE_Y - BAR_TOP_MARGIN
-    PEAK_BAR_TOP_Y = BAR_BASE_Y - MAX_BAR_HEIGHT
-    PEAK_REACH_FROM_FRAME_BOTTOM = (H - 1) - PEAK_BAR_TOP_Y
-    _BAR_SLOT_W = int(BAR_WIDTH + GUTTER)
-    MATRIX_CELL_W = max(1, _BAR_SLOT_W // MATRIX_CHARS_PER_BAR_ROW)
-    MATRIX_CELL_H = max(8, int(MATRIX_CELL_W * MATRIX_CELL_HEIGHT_RATIO))
-
-    if MAX_BAR_HEIGHT > MAX_DRAWABLE_HEIGHT:
-        raise ValueError(
-            f"MAX_BAR_HEIGHT ({MAX_BAR_HEIGHT}) exceeds drawable range "
-            f"({MAX_DRAWABLE_HEIGHT}): BAR_BASE_Y={BAR_BASE_Y}, BAR_TOP_MARGIN={BAR_TOP_MARGIN}"
-        )
-
-
-def apply_config(config: dict[str, Any] | None = None) -> None:
-    """Apply a config dict (from UI or CLI) onto module-level knobs."""
-    global W, H, N_BANDS, GUTTER, MAX_BAR_HEIGHT, BAR_BOTTOM_MARGIN, BAR_TOP_MARGIN
-    global FPS, AUDIO_PATH, OUTPUT_PATH, STATIC_COLOR, GRADIENT_COLOR_BOTTOM, GRADIENT_COLOR_TOP
-    global FMIN, FMAX, EXPONENT, TILT_MIN, TILT_MAX
-    global GRAVITY_ATTACK, GRAVITY_MAX_DECAY, GRAVITY_MIN_DECAY, GAUSSIAN_FILTER
-    global SPECTRAL_DELAY_MAX_FRAMES, USE_SPECTRAL_DELAY, USE_WASH_DELAY
-    global MATRIX_CHARS_PER_BAR_ROW, MATRIX_CELL_HEIGHT_RATIO, MATRIX_LUM_CUTOFF
-    global MATRIX_SEED, MATRIX_FONT_THICKNESS, MATRIX_GLYPH_PAD
-    global MATRIX_RAIN_FPS, MATRIX_RAIN_SCREEN_TOP_BRIGHTNESS
-    global MATRIX_RAIN_SCREEN_BOTTOM_BRIGHTNESS, MATRIX_RAIN_CHAR_MUTATION
-    global USE_MATRIX_MASK, USE_MATRIX_RAIN
-
-    cfg = get_default_config()
-    if config:
-        cfg.update(config)
-
-    W = int(cfg["W"])
-    H = int(cfg["H"])
-    N_BANDS = int(cfg["N_BANDS"])
-    GUTTER = int(cfg["GUTTER"])
-    MAX_BAR_HEIGHT = int(cfg["MAX_BAR_HEIGHT"])
-    BAR_BOTTOM_MARGIN = int(cfg["BAR_BOTTOM_MARGIN"])
-    BAR_TOP_MARGIN = int(cfg["BAR_TOP_MARGIN"])
-    FPS = int(cfg["FPS"])
-    STATIC_COLOR = _parse_color(cfg["STATIC_COLOR"])
-    GRADIENT_COLOR_BOTTOM = _parse_color(cfg["GRADIENT_COLOR_BOTTOM"])
-    GRADIENT_COLOR_TOP = _parse_color(cfg["GRADIENT_COLOR_TOP"])
-    FMIN = int(cfg["FMIN"])
-    FMAX = int(cfg["FMAX"])
-    EXPONENT = float(cfg["EXPONENT"])
-    TILT_MIN = float(cfg["TILT_MIN"])
-    TILT_MAX = float(cfg["TILT_MAX"])
-    GRAVITY_ATTACK = float(cfg["GRAVITY_ATTACK"])
-    GRAVITY_MAX_DECAY = float(cfg["GRAVITY_MAX_DECAY"])
-    GRAVITY_MIN_DECAY = float(cfg["GRAVITY_MIN_DECAY"])
-    GAUSSIAN_FILTER = float(cfg["GAUSSIAN_FILTER"])
-    SPECTRAL_DELAY_MAX_FRAMES = int(cfg["SPECTRAL_DELAY_MAX_FRAMES"])
-    USE_SPECTRAL_DELAY = bool(cfg["USE_SPECTRAL_DELAY"])
-    USE_WASH_DELAY = bool(cfg["USE_WASH_DELAY"])
-    MATRIX_CHARS_PER_BAR_ROW = int(cfg["MATRIX_CHARS_PER_BAR_ROW"])
-    MATRIX_CELL_HEIGHT_RATIO = float(cfg["MATRIX_CELL_HEIGHT_RATIO"])
-    MATRIX_LUM_CUTOFF = int(cfg["MATRIX_LUM_CUTOFF"])
-    MATRIX_FONT_THICKNESS = int(cfg["MATRIX_FONT_THICKNESS"])
-    MATRIX_RAIN_FPS = int(cfg["MATRIX_RAIN_FPS"])
-    MATRIX_RAIN_SCREEN_TOP_BRIGHTNESS = int(cfg["MATRIX_RAIN_SCREEN_TOP_BRIGHTNESS"])
-    MATRIX_RAIN_SCREEN_BOTTOM_BRIGHTNESS = int(cfg["MATRIX_RAIN_SCREEN_BOTTOM_BRIGHTNESS"])
-    MATRIX_RAIN_CHAR_MUTATION = float(cfg["MATRIX_RAIN_CHAR_MUTATION"])
-    USE_MATRIX_MASK = bool(cfg["USE_MATRIX_MASK"])
-    USE_MATRIX_RAIN = bool(cfg["USE_MATRIX_RAIN"])
-
-    seed_raw = cfg.get("MATRIX_SEED", "")
-    if seed_raw is None or seed_raw == "":
-        MATRIX_SEED = None
-    else:
-        MATRIX_SEED = int(seed_raw)
-
-    if "AUDIO_PATH" in (config or {}):
-        AUDIO_PATH = str(config["AUDIO_PATH"])  # type: ignore[index]
-    if "OUTPUT_PATH" in (config or {}):
-        OUTPUT_PATH = str(config["OUTPUT_PATH"])  # type: ignore[index]
-
-    if USE_MATRIX_MASK and USE_MATRIX_RAIN:
-        # Prefer rain when both are somehow enabled.
-        USE_MATRIX_MASK = False
-
-    _recompute_derived()
-
-
-_recompute_derived()
 
 ### WAVEFORM PRE-PROCESSING FUNCTIONS #########################################
 
@@ -439,55 +207,68 @@ def spectral_delay(S_norm: np.ndarray, max_delay_frames: int=4) -> np.ndarray:
 
 ### AUDIO SIGNAL CHAIN ###################################################
 
-def build_signal_chain(audio_path: str) -> float:
-    """
-    Load audio, build the mel / FX chain, and stash results on module globals
-    used by make_frame / amplitudes_at_time. Returns pre-peak max for logging.
-    """
+def _prepare_audio_and_signal():
+    """Load audio and build S_norm / duration used by make_frame."""
     global y, sr, audio_clip, duration, S_norm
     global fmin, fmax, exponent, tilt_min, tilt_max
     global gravity_attack, gravity_max_decay, gravity_min_decay, gaussian_filter
 
-    y, sr = librosa.load(audio_path)
-    audio_clip = AudioFileClip(audio_path)
+### The Essentials #####
+
+# Load audio file into MoviePy
+    y, sr = librosa.load(AUDIO_PATH)
+    audio_clip = AudioFileClip(AUDIO_PATH)
     duration = audio_clip.duration
 
-    fmin, fmax = FMIN, FMAX
+# Mel Spectogram transform with range 20-7000Hz
+    fmin, fmax = 20, 7000
     S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=N_BANDS, fmin=fmin, fmax=fmax)
 
+# Convert to decibels
     S_db = librosa.power_to_db(S, ref=np.max)
+
+# Normalize 0 - 1 for visual representation
     S_norm = (S_db - S_db.min()) / (S_db.max() - S_db.min())
 
-    if USE_SPECTRAL_DELAY:
-        S_norm = spectral_delay(S_norm, max_delay_frames=SPECTRAL_DELAY_MAX_FRAMES)
+### Fine Tweaks #####
 
-    exponent = EXPONENT
+# spectral delay effect
+    S_norm = spectral_delay(S_norm)
+
+# Exponential curve to accentuate low frequencies
+    exponent = 2.6
     S_norm = np.power(S_norm, exponent)
 
-    tilt_min, tilt_max = TILT_MIN, TILT_MAX
+# TILT EQ to boost treble
+    tilt_min, tilt_max = 0.8, 2.2
     tilt = np.linspace(tilt_min, tilt_max, N_BANDS)
     S_norm = (S_norm.T * tilt).T
 
-    gravity_attack, gravity_max_decay, gravity_min_decay = (
-        GRAVITY_ATTACK,
-        GRAVITY_MAX_DECAY,
-        GRAVITY_MIN_DECAY,
-    )
+### WAVEFORM PRE-PROCESSING EXECUTION #########################################
+
+# gravity / liquid effect
+    gravity_attack, gravity_max_decay, gravity_min_decay = 0.5, 0.15, 0.05
     S_norm = gravity(S_norm, gravity_attack, gravity_max_decay, gravity_min_decay)
 
-    if USE_WASH_DELAY:
-        S_norm = wash_delay(S_norm)
+# wash delay effect
+    S_norm = wash_delay(S_norm)
 
-    gaussian_filter = GAUSSIAN_FILTER
-    S_norm = gaussian_filter1d(S_norm, sigma=gaussian_filter, axis=0)
+# rolling average (less detail in waveform, more smooth)
+# S_norm = rolling_average(S_norm, 5)
 
-    peak = float(S_norm.max())
+# rubber-band effect, spread of frequency data across x axis
+    gaussian_filter = 1.0
+    S_norm = gaussian_filter1d(S_norm, sigma=gaussian_filter, axis=0) # sigma dictates blur strength (1.0-2.0 usually solid)
+
+# Scale so the loudest moment maps to amp=1 -> MAX_BAR_HEIGHT px from BAR_BASE_Y.
+    peak = S_norm.max()
     if peak > 0:
         S_norm = S_norm / peak
+
     return peak
 
 
-def log_run_config(pre_peak: float, audio_path: str) -> None:
+def log_run_config(pre_peak: float) -> None:
     """Print grouped startup config after the signal chain is ready."""
     log_section("Environment")
     log_item("OpenCV", cv2.__version__)
@@ -507,23 +288,22 @@ def log_run_config(pre_peak: float, audio_path: str) -> None:
     log_item("At amp=1.0", f"top y={PEAK_BAR_TOP_Y}, reach from bottom={PEAK_REACH_FROM_FRAME_BOTTOM}px")
 
     log_section("Audio")
-    log_item("Source", audio_path)
+    log_item("Source", AUDIO_PATH)
     log_item("Duration", f"{duration:.2f}s")
     log_item("Mel bands", N_BANDS)
     log_item("Mel range", f"{fmin}-{fmax} Hz")
 
     log_section("Signal processing")
-    log_item("Spectral delay", "on" if USE_SPECTRAL_DELAY else "off")
+    log_item("Spectral delay", "on")
     log_item("Exponent", exponent)
     log_item("Tilt EQ", f"{tilt_min} - {tilt_max}")
     log_item(
         "Gravity",
         f"attack={gravity_attack}, decay={gravity_min_decay}-{gravity_max_decay}",
     )
-    log_item("Wash delay", "on" if USE_WASH_DELAY else "off")
+    log_item("Wash delay", "on")
     log_item("Gaussian blur", f"sigma={gaussian_filter}")
     log_item("Peak normalize", f"pre-scale max={pre_peak:.4f}")
-
 
 def amplitudes_at_time(t: float) -> np.ndarray:
     float_idx = (t / duration) * (S_norm.shape[1] - 1)
@@ -942,8 +722,8 @@ def create_vignette():
     mask = kernel / kernel.max()
     return mask[:, :, np.newaxis] # Shape (H, W, 1) for broadcasting
 
-GLOBAL_GRADIENT: np.ndarray | None = None
-VIGNETTE_MASK: np.ndarray | None = None
+GLOBAL_GRADIENT = None
+VIGNETTE_MASK = None
 
 def _save_matrix_atlas_sheet(atlas: np.ndarray, charset: str, out_path: str) -> None:
     """Contact sheet of every glyph tile for visual charset verification."""
@@ -1114,7 +894,7 @@ def make_frame(t: float) -> np.ndarray:
     This function is called by MoviePy for every frame of the video.
     't' is the current time in seconds.
     """
-
+    
     # create canvas with transparent background and mask canvas for bar drawing
     frame = np.zeros((H, W, 3), dtype='uint8')
     mask = np.zeros((H, W, 3), dtype='uint8')
@@ -1128,10 +908,8 @@ def make_frame(t: float) -> np.ndarray:
     draw_bars(mask, current_amplitudes)
 
     # Gradient color masking
-    assert GLOBAL_GRADIENT is not None
     frame = cv2.bitwise_and(GLOBAL_GRADIENT, mask)
 
-    # Matrix ASCII mask — driven by USE_MATRIX_* config flags
     if USE_MATRIX_MASK:
         frame = apply_matrix_mask(frame, mask)
     elif USE_MATRIX_RAIN:
@@ -1152,15 +930,53 @@ def make_frame(t: float) -> np.ndarray:
     return frame
 
 
+
+
 ### VIDEO RENDER AND EXPORT ###################################################
 
+OUTPUT_PATH = "output_waveform.mov"
 
-def _reset_runtime_caches() -> None:
-    """Clear per-run caches so a second generate() does not reuse stale state."""
+_OVERRIDEABLE = {
+    "W", "H", "N_BANDS", "GUTTER", "MAX_BAR_HEIGHT", "BAR_BOTTOM_MARGIN", "BAR_TOP_MARGIN",
+    "FPS", "AUDIO_PATH", "OUTPUT_PATH", "STATIC_COLOR", "GRADIENT_COLOR_BOTTOM", "GRADIENT_COLOR_TOP",
+    "MATRIX_CHARS_PER_BAR_ROW", "MATRIX_CELL_HEIGHT_RATIO", "MATRIX_LUM_CUTOFF", "MATRIX_SEED",
+    "MATRIX_FONT_THICKNESS", "MATRIX_GLYPH_PAD", "MATRIX_RAIN_FPS",
+    "MATRIX_RAIN_SCREEN_TOP_BRIGHTNESS", "MATRIX_RAIN_SCREEN_BOTTOM_BRIGHTNESS",
+    "MATRIX_RAIN_CHAR_MUTATION", "USE_MATRIX_MASK", "USE_MATRIX_RAIN", "MATRIX_CHARSET",
+}
+
+
+def _recompute_derived() -> None:
+    global BAR_WIDTH, BAR_BASE_Y, MAX_DRAWABLE_HEIGHT, PEAK_BAR_TOP_Y
+    global PEAK_REACH_FROM_FRAME_BOTTOM, _BAR_SLOT_W, MATRIX_CELL_W, MATRIX_CELL_H
+    BAR_WIDTH = (W - (N_BANDS * GUTTER)) / N_BANDS
+    BAR_BASE_Y = H - 1 - BAR_BOTTOM_MARGIN
+    MAX_DRAWABLE_HEIGHT = BAR_BASE_Y - BAR_TOP_MARGIN
+    PEAK_BAR_TOP_Y = BAR_BASE_Y - MAX_BAR_HEIGHT
+    PEAK_REACH_FROM_FRAME_BOTTOM = (H - 1) - PEAK_BAR_TOP_Y
+    _BAR_SLOT_W = int(BAR_WIDTH + GUTTER)
+    MATRIX_CELL_W = max(1, _BAR_SLOT_W // MATRIX_CHARS_PER_BAR_ROW)
+    MATRIX_CELL_H = max(8, int(MATRIX_CELL_W * MATRIX_CELL_HEIGHT_RATIO))
+    if MAX_BAR_HEIGHT > MAX_DRAWABLE_HEIGHT:
+        raise ValueError(
+            f"MAX_BAR_HEIGHT ({MAX_BAR_HEIGHT}) exceeds drawable range "
+            f"({MAX_DRAWABLE_HEIGHT}): BAR_BASE_Y={BAR_BASE_Y}, BAR_TOP_MARGIN={BAR_TOP_MARGIN}"
+        )
+
+
+def _apply_overrides(overrides: dict[str, Any]) -> None:
+    g = globals()
+    for key, value in overrides.items():
+        if key not in _OVERRIDEABLE:
+            raise KeyError(f"Unknown waveform setting: {key}")
+        g[key] = value
+    _recompute_derived()
+
+
+def _reset_caches() -> None:
     global GLOBAL_MATRIX_GLYPH_LUM, GLOBAL_GRADIENT, VIGNETTE_MASK
     global _MATRIX_RAIN_ATLAS, _MATRIX_RAIN_SNAPSHOTS, _MATRIX_RAIN_LUM_CACHE
     global _MATRIX_RAIN_SEED, _MATRIX_RAIN_SCREEN_RAMP
-
     GLOBAL_MATRIX_GLYPH_LUM = None
     GLOBAL_GRADIENT = None
     VIGNETTE_MASK = None
@@ -1171,96 +987,44 @@ def _reset_runtime_caches() -> None:
     _MATRIX_RAIN_SCREEN_RAMP = None
 
 
-class _CallbackProgressLogger(ProgressBarLogger if ProgressBarLogger is not None else object):
-    """Proglog adapter that forwards MoviePy bar progress to a UI callback."""
-
-    def __init__(self, callback: Callable[[float, str], None]):
-        if ProgressBarLogger is not None:
-            super().__init__()
-        self._callback = callback
-        self._last_message = "Rendering"
-        self._phase = 0  # 0=audio, 1=video
-
-    def callback(self, **changes):  # type: ignore[override]
-        message = changes.get("message")
-        if message:
-            self._last_message = str(message)
-            lower = self._last_message.lower()
-            if "writing video" in lower:
-                self._phase = 1
-            elif "writing audio" in lower or "building video" in lower:
-                self._phase = 0
-            self._callback(-1.0, self._last_message)
-
-    def bars_callback(self, bar, attr, value, old_value=None):  # type: ignore[override]
-        if ProgressBarLogger is None:
-            return
-        if attr != "index":
-            return
-        total = self.bars.get(bar, {}).get("total") or 0
-        if total <= 0:
-            return
-        local = max(0.0, min(1.0, float(value) / float(total)))
-        # Keep overall progress monotonic: audio fills 10–30%, video 30–99%.
-        if self._phase == 0 or bar == "chunk":
-            fraction = 0.10 + 0.20 * local
-            self._phase = 0
-        else:
-            fraction = 0.30 + 0.69 * local
-            self._phase = 1
-        label = self._last_message or str(bar)
-        self._callback(fraction, label)
-
-
 def run(
-    *,
     audio_path: str | None = None,
     output_path: str | None = None,
-    config: dict[str, Any] | None = None,
-    progress_callback: Callable[[float, str], None] | None = None,
-    debug_bars: bool = False,
-    debug_matrix: bool = False,
+    logger: Any = "bar",
+    progress_callback: Any | None = None,
+    **overrides: Any,
 ) -> str:
-    """
-    Generate a waveform visualizer video.
-
-    progress_callback(fraction, message):
-      fraction in [0, 1], or -1 when only a status message is available.
-    Returns the output path written.
-    """
+    """Render a visualizer video. Optional overrides set module knobs (W, FPS, …)."""
     global GLOBAL_GRADIENT, VIGNETTE_MASK, AUDIO_PATH, OUTPUT_PATH
 
-    cfg = dict(config or {})
     if audio_path is not None:
-        cfg["AUDIO_PATH"] = audio_path
+        overrides = {**overrides, "AUDIO_PATH": audio_path}
     if output_path is not None:
-        cfg["OUTPUT_PATH"] = output_path
+        overrides = {**overrides, "OUTPUT_PATH": output_path}
+    if overrides:
+        _apply_overrides(overrides)
 
-    apply_config(cfg)
-    _reset_runtime_caches()
+    _reset_caches()
+    audio_path = AUDIO_PATH
+    output_path = OUTPUT_PATH
 
-    audio_path = audio_path or AUDIO_PATH
-    output_path = output_path or OUTPUT_PATH
-    AUDIO_PATH = audio_path
-    OUTPUT_PATH = output_path
-
-    def report(fraction: float, message: str) -> None:
+    def report(frac: float, msg: str) -> None:
         if progress_callback is not None:
-            progress_callback(fraction, message)
+            progress_callback(frac, msg)
 
     report(0.0, "Loading audio & building signal chain")
-    peak = build_signal_chain(audio_path)
-    log_run_config(peak, audio_path)
+    peak = _prepare_audio_and_signal()
+    log_run_config(peak)
 
     GLOBAL_GRADIENT = create_gradient()
     VIGNETTE_MASK = create_vignette()
 
-    if debug_bars:
+    if DEBUG_BARS_ONLY:
         debug_bar_geometry()
         report(1.0, "Debug bars complete")
         return debug_out(DEBUG_FLAG_BARS, "composite.png")
 
-    if debug_matrix:
+    if DEBUG_MATRIX_ONLY:
         debug_matrix_glyphs()
         report(1.0, "Debug matrix complete")
         return debug_out(DEBUG_FLAG_MATRIX, "atlas.png")
@@ -1281,13 +1045,8 @@ def run(
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    assert audio_clip is not None
     clip = VideoClip(make_frame, duration=duration)
     clip = clip.with_audio(audio_clip)
-
-    logger: Any = "bar"
-    if progress_callback is not None and ProgressBarLogger is not None:
-        logger = _CallbackProgressLogger(progress_callback)
 
     report(0.1, "Writing video")
     print()
@@ -1297,8 +1056,8 @@ def run(
         codec="prores_ks",
         logger=logger,
         ffmpeg_params=[
-            "-profile:v", "4",          # '4' is the ProRes 4444 profile
-            "-pix_fmt", "yuva444p10le"  # 10-bit YUV + Alpha
+            "-profile:v", "4",
+            "-pix_fmt", "yuva444p10le",
         ],
     )
     log_item("Status", "complete")
@@ -1307,12 +1066,5 @@ def run(
     return output_path
 
 
-def main(argv: list[str] | None = None) -> None:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    debug_bars = DEBUG_BAR_HEIGHT or "--debug-bars" in argv
-    debug_matrix = "--debug-matrix" in argv
-    run(debug_bars=debug_bars, debug_matrix=debug_matrix)
-
-
 if __name__ == "__main__":
-    main()
+    run()
