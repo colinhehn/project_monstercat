@@ -21,7 +21,7 @@ python3 app.py
 - **Visualizer** dropdown — currently only Waveform; more methods can register in
   [`visualizers.py`](visualizers.py).
 - **Audio / output paths** — type absolute or relative paths.
-- **Config tabs** — Canvas, Colors, Signal, Matrix (defaults match `waveform.py`).
+- **Config tabs** — Canvas, Colors, Matrix (defaults match `waveform.py` knobs).
 - **Generate** (`g`) — runs the selected backend on a worker thread and streams
   progress into the status bar / log.
 
