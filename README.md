@@ -9,6 +9,27 @@ I need to promote some music projects I'm working on, will never give a single
 dollar to Adobe, and am lowkey interested in audio (or audiovisual) programming,
 no matter how rudimentary!!
 
+#### Visualizers
+
+**Bars (`waveform.py`)** — Mel-band amplitudes as vertical bars (Monstercat-style),
+with optional matrix rain / CRT / bloom. Edit constants at the top, then:
+
+```bash
+python3 waveform.py
+```
+
+**Wobble line (`wobble.py`)** — Same mel → MoviePy path, but a single white
+horizontal line through screen center. Left-to-right = low-to-high bands;
+amplitude displaces each point vertically (`MAX_DISPLACEMENT`). Black background,
+no CRT / matrix / bloom. Tune `AUDIO_PATH`, `N_BANDS`, `LINE_THICKNESS`,
+`MAX_DISPLACEMENT`, then:
+
+```bash
+python3 wobble.py
+```
+
+Output: `output_wobble.mov`.
+
 #### What's Going On Here?
 
 Moviepy calls make_frame for each frame in the video (with a given FPS, codec,
