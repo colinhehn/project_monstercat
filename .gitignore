@@ -10,4 +10,6 @@ exports/
 # output files
 output_waveform.mov
 output_waveformTEMP_MPY_wvf_snd.mp3
+output_wobble.mov
+output_wobbleTEMP_MPY_wvf_snd.mp3
 debug/
