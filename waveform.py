@@ -75,7 +75,7 @@ def log_matrix_mask(
 
 #### CONFIGURATION ############################################################
 
-# TODO: make these configurable on script runtime with Textual CLI (GitHub).
+# Module-level knobs. run(**overrides) can set these before a render.
 W, H = 1080, 1920
 N_BANDS = 18
 GUTTER = 4 # px gap between bars
@@ -207,57 +207,65 @@ def spectral_delay(S_norm: np.ndarray, max_delay_frames: int=4) -> np.ndarray:
 
 ### AUDIO SIGNAL CHAIN ###################################################
 
+def _prepare_audio_and_signal():
+    """Load audio and build S_norm / duration used by make_frame."""
+    global y, sr, audio_clip, duration, S_norm
+    global fmin, fmax, exponent, tilt_min, tilt_max
+    global gravity_attack, gravity_max_decay, gravity_min_decay, gaussian_filter
+
 ### The Essentials #####
 
 # Load audio file into MoviePy
-y, sr = librosa.load(AUDIO_PATH)
-audio_clip = AudioFileClip(AUDIO_PATH)
-duration = audio_clip.duration
+    y, sr = librosa.load(AUDIO_PATH)
+    audio_clip = AudioFileClip(AUDIO_PATH)
+    duration = audio_clip.duration
 
 # Mel Spectogram transform with range 20-7000Hz
-fmin, fmax = 20, 7000
-S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=N_BANDS, fmin=fmin, fmax=fmax)
+    fmin, fmax = 20, 7000
+    S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=N_BANDS, fmin=fmin, fmax=fmax)
 
 # Convert to decibels
-S_db = librosa.power_to_db(S, ref=np.max)
+    S_db = librosa.power_to_db(S, ref=np.max)
 
 # Normalize 0 - 1 for visual representation
-S_norm = (S_db - S_db.min()) / (S_db.max() - S_db.min())
+    S_norm = (S_db - S_db.min()) / (S_db.max() - S_db.min())
 
 ### Fine Tweaks #####
 
 # spectral delay effect
-S_norm = spectral_delay(S_norm)
+    S_norm = spectral_delay(S_norm)
 
 # Exponential curve to accentuate low frequencies
-exponent = 2.6
-S_norm = np.power(S_norm, exponent)
+    exponent = 2.6
+    S_norm = np.power(S_norm, exponent)
 
 # TILT EQ to boost treble
-tilt_min, tilt_max = 0.8, 2.2
-tilt = np.linspace(tilt_min, tilt_max, N_BANDS)
-S_norm = (S_norm.T * tilt).T
+    tilt_min, tilt_max = 0.8, 2.2
+    tilt = np.linspace(tilt_min, tilt_max, N_BANDS)
+    S_norm = (S_norm.T * tilt).T
 
 ### WAVEFORM PRE-PROCESSING EXECUTION #########################################
 
 # gravity / liquid effect
-gravity_attack, gravity_max_decay, gravity_min_decay = 0.5, 0.15, 0.05
-S_norm = gravity(S_norm, gravity_attack, gravity_max_decay, gravity_min_decay)
+    gravity_attack, gravity_max_decay, gravity_min_decay = 0.5, 0.15, 0.05
+    S_norm = gravity(S_norm, gravity_attack, gravity_max_decay, gravity_min_decay)
 
 # wash delay effect
-S_norm = wash_delay(S_norm)
+    S_norm = wash_delay(S_norm)
 
 # rolling average (less detail in waveform, more smooth)
 # S_norm = rolling_average(S_norm, 5)
 
 # rubber-band effect, spread of frequency data across x axis
-gaussian_filter = 1.0
-S_norm = gaussian_filter1d(S_norm, sigma=gaussian_filter, axis=0) # sigma dictates blur strength (1.0-2.0 usually solid)
+    gaussian_filter = 1.0
+    S_norm = gaussian_filter1d(S_norm, sigma=gaussian_filter, axis=0) # sigma dictates blur strength (1.0-2.0 usually solid)
 
 # Scale so the loudest moment maps to amp=1 -> MAX_BAR_HEIGHT px from BAR_BASE_Y.
-peak = S_norm.max()
-if peak > 0:
-    S_norm = S_norm / peak
+    peak = S_norm.max()
+    if peak > 0:
+        S_norm = S_norm / peak
+
+    return peak
 
 
 def log_run_config(pre_peak: float) -> None:
@@ -296,10 +304,6 @@ def log_run_config(pre_peak: float) -> None:
     log_item("Wash delay", "on")
     log_item("Gaussian blur", f"sigma={gaussian_filter}")
     log_item("Peak normalize", f"pre-scale max={pre_peak:.4f}")
-
-
-log_run_config(peak)
-
 
 def amplitudes_at_time(t: float) -> np.ndarray:
     float_idx = (t / duration) * (S_norm.shape[1] - 1)
@@ -718,8 +722,8 @@ def create_vignette():
     mask = kernel / kernel.max()
     return mask[:, :, np.newaxis] # Shape (H, W, 1) for broadcasting
 
-GLOBAL_GRADIENT = create_gradient()
-VIGNETTE_MASK = create_vignette()
+GLOBAL_GRADIENT = None
+VIGNETTE_MASK = None
 
 def _save_matrix_atlas_sheet(atlas: np.ndarray, charset: str, out_path: str) -> None:
     """Contact sheet of every glyph tile for visual charset verification."""
@@ -906,11 +910,10 @@ def make_frame(t: float) -> np.ndarray:
     # Gradient color masking
     frame = cv2.bitwise_and(GLOBAL_GRADIENT, mask)
 
-    # Matrix ASCII mask (static CMatrix-style glyphs on bars)
-    # frame = apply_matrix_mask(frame, mask)
-
-    # Dynamic matrix rain mask (falling code columns on bars)
-    frame = apply_matrix_rain_mask(frame, mask, t)
+    if USE_MATRIX_MASK:
+        frame = apply_matrix_mask(frame, mask)
+    elif USE_MATRIX_RAIN:
+        frame = apply_matrix_rain_mask(frame, mask, t)
 
     # CRT Scanlines
     frame[::3, :,:] = (frame[::3, :, :] * 0.5).astype('uint8')
@@ -928,41 +931,140 @@ def make_frame(t: float) -> np.ndarray:
 
 
 
+
 ### VIDEO RENDER AND EXPORT ###################################################
-
-if DEBUG_BARS_ONLY:
-    debug_bar_geometry()
-    sys.exit(0)
-
-if DEBUG_MATRIX_ONLY:
-    debug_matrix_glyphs()
-    sys.exit(0)
 
 OUTPUT_PATH = "output_waveform.mov"
 
-if USE_MATRIX_MASK:
-    _ensure_matrix_glyph_field()
-elif USE_MATRIX_RAIN:
-    precompute_matrix_rain_snapshots()
-else:
-    log_matrix_mask(enabled=False)
+_OVERRIDEABLE = {
+    "W", "H", "N_BANDS", "GUTTER", "MAX_BAR_HEIGHT", "BAR_BOTTOM_MARGIN", "BAR_TOP_MARGIN",
+    "FPS", "AUDIO_PATH", "OUTPUT_PATH", "STATIC_COLOR", "GRADIENT_COLOR_BOTTOM", "GRADIENT_COLOR_TOP",
+    "MATRIX_CHARS_PER_BAR_ROW", "MATRIX_CELL_HEIGHT_RATIO", "MATRIX_LUM_CUTOFF", "MATRIX_SEED",
+    "MATRIX_FONT_THICKNESS", "MATRIX_GLYPH_PAD", "MATRIX_RAIN_FPS",
+    "MATRIX_RAIN_SCREEN_TOP_BRIGHTNESS", "MATRIX_RAIN_SCREEN_BOTTOM_BRIGHTNESS",
+    "MATRIX_RAIN_CHAR_MUTATION", "USE_MATRIX_MASK", "USE_MATRIX_RAIN", "MATRIX_CHARSET",
+}
 
-log_section("Export")
-log_item("Output", OUTPUT_PATH)
-log_item("Codec", "prores_ks (4444, yuva444p10le)")
 
-clip = VideoClip(make_frame, duration=duration)
-clip = clip.with_audio(audio_clip)
-print()
-clip.write_videofile(
-    OUTPUT_PATH,
-    fps=FPS,
-    codec="prores_ks",
-    logger="bar",
-    ffmpeg_params=[
-        "-profile:v", "4",          # '4' is the ProRes 4444 profile
-        "-pix_fmt", "yuva444p10le"  # 10-bit YUV + Alpha
-    ],
-)
-log_item("Status", "complete")
-print()
+def _recompute_derived() -> None:
+    global BAR_WIDTH, BAR_BASE_Y, MAX_DRAWABLE_HEIGHT, PEAK_BAR_TOP_Y
+    global PEAK_REACH_FROM_FRAME_BOTTOM, _BAR_SLOT_W, MATRIX_CELL_W, MATRIX_CELL_H
+    BAR_WIDTH = (W - (N_BANDS * GUTTER)) / N_BANDS
+    BAR_BASE_Y = H - 1 - BAR_BOTTOM_MARGIN
+    MAX_DRAWABLE_HEIGHT = BAR_BASE_Y - BAR_TOP_MARGIN
+    PEAK_BAR_TOP_Y = BAR_BASE_Y - MAX_BAR_HEIGHT
+    PEAK_REACH_FROM_FRAME_BOTTOM = (H - 1) - PEAK_BAR_TOP_Y
+    _BAR_SLOT_W = int(BAR_WIDTH + GUTTER)
+    MATRIX_CELL_W = max(1, _BAR_SLOT_W // MATRIX_CHARS_PER_BAR_ROW)
+    MATRIX_CELL_H = max(8, int(MATRIX_CELL_W * MATRIX_CELL_HEIGHT_RATIO))
+    if MAX_BAR_HEIGHT > MAX_DRAWABLE_HEIGHT:
+        raise ValueError(
+            f"MAX_BAR_HEIGHT ({MAX_BAR_HEIGHT}) exceeds drawable range "
+            f"({MAX_DRAWABLE_HEIGHT}): BAR_BASE_Y={BAR_BASE_Y}, BAR_TOP_MARGIN={BAR_TOP_MARGIN}"
+        )
+
+
+def _apply_overrides(overrides: dict[str, Any]) -> None:
+    g = globals()
+    for key, value in overrides.items():
+        if key not in _OVERRIDEABLE:
+            raise KeyError(f"Unknown waveform setting: {key}")
+        g[key] = value
+    _recompute_derived()
+
+
+def _reset_caches() -> None:
+    global GLOBAL_MATRIX_GLYPH_LUM, GLOBAL_GRADIENT, VIGNETTE_MASK
+    global _MATRIX_RAIN_ATLAS, _MATRIX_RAIN_SNAPSHOTS, _MATRIX_RAIN_LUM_CACHE
+    global _MATRIX_RAIN_SEED, _MATRIX_RAIN_SCREEN_RAMP
+    GLOBAL_MATRIX_GLYPH_LUM = None
+    GLOBAL_GRADIENT = None
+    VIGNETTE_MASK = None
+    _MATRIX_RAIN_ATLAS = None
+    _MATRIX_RAIN_SNAPSHOTS = None
+    _MATRIX_RAIN_LUM_CACHE = {}
+    _MATRIX_RAIN_SEED = None
+    _MATRIX_RAIN_SCREEN_RAMP = None
+
+
+def run(
+    audio_path: str | None = None,
+    output_path: str | None = None,
+    logger: Any = "bar",
+    progress_callback: Any | None = None,
+    **overrides: Any,
+) -> str:
+    """Render a visualizer video. Optional overrides set module knobs (W, FPS, …)."""
+    global GLOBAL_GRADIENT, VIGNETTE_MASK, AUDIO_PATH, OUTPUT_PATH
+
+    if audio_path is not None:
+        overrides = {**overrides, "AUDIO_PATH": audio_path}
+    if output_path is not None:
+        overrides = {**overrides, "OUTPUT_PATH": output_path}
+    if overrides:
+        _apply_overrides(overrides)
+
+    _reset_caches()
+    audio_path = AUDIO_PATH
+    output_path = OUTPUT_PATH
+
+    def report(frac: float, msg: str) -> None:
+        if progress_callback is not None:
+            progress_callback(frac, msg)
+
+    report(0.0, "Loading audio & building signal chain")
+    peak = _prepare_audio_and_signal()
+    log_run_config(peak)
+
+    GLOBAL_GRADIENT = create_gradient()
+    VIGNETTE_MASK = create_vignette()
+
+    if DEBUG_BARS_ONLY:
+        debug_bar_geometry()
+        report(1.0, "Debug bars complete")
+        return debug_out(DEBUG_FLAG_BARS, "composite.png")
+
+    if DEBUG_MATRIX_ONLY:
+        debug_matrix_glyphs()
+        report(1.0, "Debug matrix complete")
+        return debug_out(DEBUG_FLAG_MATRIX, "atlas.png")
+
+    report(0.05, "Preparing matrix / masks")
+    if USE_MATRIX_MASK:
+        _ensure_matrix_glyph_field()
+    elif USE_MATRIX_RAIN:
+        precompute_matrix_rain_snapshots()
+    else:
+        log_matrix_mask(enabled=False)
+
+    log_section("Export")
+    log_item("Output", output_path)
+    log_item("Codec", "prores_ks (4444, yuva444p10le)")
+
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    clip = VideoClip(make_frame, duration=duration)
+    clip = clip.with_audio(audio_clip)
+
+    report(0.1, "Writing video")
+    print()
+    clip.write_videofile(
+        output_path,
+        fps=FPS,
+        codec="prores_ks",
+        logger=logger,
+        ffmpeg_params=[
+            "-profile:v", "4",
+            "-pix_fmt", "yuva444p10le",
+        ],
+    )
+    log_item("Status", "complete")
+    print()
+    report(1.0, "Complete")
+    return output_path
+
+
+if __name__ == "__main__":
+    run()

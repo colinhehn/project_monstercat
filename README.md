@@ -9,6 +9,30 @@ I need to promote some music projects I'm working on, will never give a single
 dollar to Adobe, and am lowkey interested in audio (or audiovisual) programming,
 no matter how rudimentary!!
 
+#### Textual UI
+
+Launch the lightweight TUI to pick an audio file, choose a visualizer method,
+tweak settings, set an output path, and watch render progress:
+
+```bash
+python3 app.py
+```
+
+- **Visualizer** dropdown — currently only Waveform; more methods can register in
+  [`visualizers.py`](visualizers.py).
+- **Audio / output paths** — type absolute or relative paths.
+- **Config tabs** — Canvas, Colors, Matrix (defaults match `waveform.py` knobs).
+- **Generate** (`g`) — runs the selected backend on a worker thread and streams
+  progress into the status bar / log.
+
+CLI still works for the waveform backend alone:
+
+```bash
+python3 waveform.py
+python3 waveform.py --debug-bars
+python3 waveform.py --debug-matrix
+```
+
 #### What's Going On Here?
 
 Moviepy calls make_frame for each frame in the video (with a given FPS, codec,
@@ -34,12 +58,13 @@ keeping the gradient colors — a digital/code look.
 
 **Static grid** — one random layout for the whole video:
 
-1. Uncomment `frame = apply_matrix_mask(frame, mask)` in `make_frame`; set `USE_MATRIX_MASK = True`, `USE_MATRIX_RAIN = False`.
+1. Set `USE_MATRIX_MASK = True`, `USE_MATRIX_RAIN = False` (or toggle the same
+   switches in the TUI).
 2. Tune density via `MATRIX_CHARS_PER_BAR_ROW`, `MATRIX_CELL_HEIGHT_RATIO`, `MATRIX_CHARSET`, `MATRIX_LUM_CUTOFF`, and `MATRIX_SEED`.
 
 **Dynamic rain** — falling columns with bright head and dimming trail:
 
-1. Uncomment `frame = apply_matrix_rain_mask(frame, mask, t)` in `make_frame`; set `USE_MATRIX_RAIN = True`, `USE_MATRIX_MASK = False`.
+1. Set `USE_MATRIX_RAIN = True`, `USE_MATRIX_MASK = False` (TUI switches work too).
 2. Tune `MATRIX_RAIN_FPS` and `MATRIX_RAIN_CHAR_MUTATION`. Rain is continuous (new glyph every tick per column, no idle gaps).
 3. Brightness: `MATRIX_RAIN_SCREEN_TOP_BRIGHTNESS` / `MATRIX_RAIN_SCREEN_BOTTOM_BRIGHTNESS` control a linear fade by screen y (dim top, bright bottom). `MATRIX_LUM_CUTOFF` applies to the static mask only; rain keeps any non-zero glyph stroke.
 
@@ -81,8 +106,8 @@ has a TUI) maybe I'll make it more open-source friendly
 - Add color to the waveform, and gradients??? Maybe the gradient could be
   moving... panning linearly as an overlay or pass-through or something. [WIP]
 - bloom [WIP]
-- TUI with Rich or Textual
-- In the future it could all be configurable.
+- TUI with Rich or Textual [DONE — `python3 app.py`]
+- In the future it could all be configurable. [DONE for Waveform knobs in the TUI]
   - Be able to adjust the frequency bins to fit different types of audio for
     optimal visual clarity. A guitar solo will not render very interestingly on
     this visualizer right now...
